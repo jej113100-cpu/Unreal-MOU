@@ -107,6 +107,63 @@ void UVoiceStatusWidget::HandleMuteKeyPressed()
 // 상태 표시
 // ---------------------------------------------------------------------------
 
+namespace
+{
+	/** 게이지 칸 수. 많을수록 세밀하지만 글자가 길어진다. */
+	constexpr int32 GGaugeCells = 20;
+
+	/**
+	 * 게이지가 표현하는 음량 범위의 상한.
+	 *
+	 * 보통 목소리의 RMS 는 0.05~0.15 근처다. 상한을 1.0 으로 잡으면 말해도
+	 * 막대가 한두 칸밖에 안 움직여서 **아무것도 읽을 수 없다.**
+	 * 0.25 면 말할 때 막대가 절반 이상 차서 변화가 눈에 보인다.
+	 */
+	constexpr float GGaugeMaxLoudness = 0.25f;
+
+	/**
+	 * 입력 음량을 막대로 그린다.
+	 *
+	 * ★ 이 게이지가 있는 이유(VOICE_INTEGRATION.md 9절):
+	 *   "감도 슬라이더 옆에 실시간 입력 게이지를 반드시 같이 둔다.
+	 *    숫자만 있으면 아무도 못 맞춘다."
+	 *
+	 *   실제로 "가만히 있는데 계속 말하는 중" 문제를 만났을 때, 내 잡음 바닥이
+	 *   얼마인지 볼 수 없으면 감도를 어디로 옮겨야 하는지 알 방법이 없다.
+	 *   기준선(|)을 막대 안에 같이 그려서 **"지금 잡음이 기준을 넘고 있다"** 가
+	 *   한눈에 보이게 한다.
+	 */
+	FString MakeLevelGauge(float Loudness, float Threshold)
+	{
+		const auto ToCell = [](float Value)
+		{
+			return FMath::Clamp(FMath::RoundToInt(Value / GGaugeMaxLoudness * GGaugeCells), 0, GGaugeCells);
+		};
+
+		const int32 FilledCells    = ToCell(Loudness);
+		const int32 ThresholdCell  = FMath::Min(ToCell(Threshold), GGaugeCells - 1);
+
+		FString Bar;
+		Bar.Reserve(GGaugeCells + 2);
+
+		for (int32 Cell = 0; Cell < GGaugeCells; ++Cell)
+		{
+			if (Cell == ThresholdCell)
+			{
+				// 기준선. 채워졌는지도 같이 알아야 하므로 글자를 나눈다.
+				// (I = 기준선을 넘김, | = 아직 안 넘김)
+				Bar.AppendChar(Cell < FilledCells ? TEXT('I') : TEXT('|'));
+			}
+			else
+			{
+				Bar.AppendChar(Cell < FilledCells ? TEXT('=') : TEXT('.'));
+			}
+		}
+
+		return Bar;
+	}
+}
+
 void UVoiceStatusWidget::RefreshStatusText()
 {
 	if (StatusText == nullptr)
@@ -116,12 +173,34 @@ void UVoiceStatusWidget::RefreshStatusText()
 
 	UVoiceSubsystem* Voice = GetVoiceSubsystem();
 
+	// ★ 사망을 가장 먼저 본다. 마이크가 있든 없든, 음소거든 아니든 결과가 같기 때문이다.
+	//   이걸 명시적으로 알려주지 않으면 "왜 아무도 내 말을 안 듣지" 로 한참 헤맨다.
+	if (Voice && Voice->IsVoiceDead())
+	{
+		StatusText->SetText(FText::FromString(TEXT("[사망] 말할 수도, 들을 수도 없습니다")));
+		StatusText->SetColorAndOpacity(FSlateColor(FLinearColor(0.9f, 0.25f, 0.25f)));
+		return;
+	}
+
 	// 마이크가 아예 없는 경우 - 색으로 상태를 구분하되 텍스트로도 명확히 알린다.
 	// 색만으로 구분하면 색각 이상이 있는 사용자가 상태를 못 읽는다.
 	if (!Voice || !Voice->IsCaptureReady())
 	{
-		StatusText->SetText(FText::FromString(TEXT("[마이크 없음]")));
+		StatusText->SetText(FText::FromString(
+			TEXT("[마이크 없음]\n에디터를 켠 뒤 꽂았다면 재시작 필요 (MOU.Voice.Diag)")));
 		StatusText->SetColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.5f, 0.5f)));
+		return;
+	}
+
+	// 보정 중에는 다른 것을 보여줄 이유가 없다. "지금 조용히 해야 한다" 만 크게 알린다.
+	if (Voice->IsCalibrating())
+	{
+		StatusText->SetText(FText::FromString(FString::Printf(
+			TEXT("[감도 보정 중] 말하지 마세요... %.1f초\n%s  %.4f"),
+			Voice->GetCalibrationRemainingSeconds(),
+			*MakeLevelGauge(Voice->GetCurrentLoudness(), Voice->GetMicSensitivity()),
+			Voice->GetCurrentLoudness())));
+		StatusText->SetColorAndOpacity(FSlateColor(FLinearColor(1.f, 0.85f, 0.3f)));
 		return;
 	}
 
@@ -132,17 +211,26 @@ void UVoiceStatusWidget::RefreshStatusText()
 		return;
 	}
 
+	const float Loudness  = Voice->GetCurrentLoudness();
+	const float Threshold = Voice->GetMicSensitivity();
+
+	// 둘째 줄은 항상 같은 모양으로 둔다. 상태에 따라 줄 수가 바뀌면 글자가
+	// 위아래로 흔들려서 오히려 읽기 어렵다.
+	const FString LevelLine = bShowLevelGauge
+		? FString::Printf(TEXT("\n%s  %.4f / 기준 %.4f"), *MakeLevelGauge(Loudness, Threshold), Loudness, Threshold)
+		: FString();
+
 	if (Voice->IsSpeaking())
 	{
 		// 말하는 중에만 강조색을 준다 - "지금 내 목소리가 실제로 나가고 있다" 는
 		// 순간적인 신호다. 이게 없으면 오픈 마이크인데 마이크가 실제로 잡고
 		// 있는지 감이 안 온다.
-		StatusText->SetText(FText::FromString(TEXT("[마이크 ON] 말하는 중")));
+		StatusText->SetText(FText::FromString(TEXT("[마이크 ON] 말하는 중") + LevelLine));
 		StatusText->SetColorAndOpacity(FSlateColor(FLinearColor(0.3f, 1.f, 0.3f)));
 	}
 	else
 	{
-		StatusText->SetText(FText::FromString(TEXT("[마이크 ON]")));
+		StatusText->SetText(FText::FromString(TEXT("[마이크 ON]") + LevelLine));
 		StatusText->SetColorAndOpacity(FSlateColor(FLinearColor(0.8f, 0.8f, 0.8f)));
 	}
 }

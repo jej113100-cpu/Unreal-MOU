@@ -107,6 +107,145 @@ void UVoiceSynthComponent::SetProximityMode(EVoiceMode Mode)
 	bSpatialConfigured = true;
 }
 
+// ---------------------------------------------------------------------------
+// 무전 톤 (V7)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/**
+	 * 무전 대역. 사람 목소리에서 명료도를 담당하는 구간만 남긴다.
+	 *
+	 * 전화가 300~3400Hz 를 쓰는 것과 같은 이유다. 저음(가슴 울림)과
+	 * 고음(공기 소리)을 깎아내면 **대역이 좁아서 오히려 "기계를 통해 온 소리"** 로
+	 * 들린다 - 무전기다움의 절반은 이 좁은 대역에서 나온다.
+	 */
+	constexpr float GRadioHighPassHz = 400.f;   // 이 아래를 깎는다
+	constexpr float GRadioLowPassHz  = 2800.f;  // 이 위를 깎는다
+
+	/** 찌그러짐 강도. 입력을 키워 소프트 클리핑에 밀어넣는 배율이다. */
+	constexpr float GRadioDriveGain = 2.6f;
+
+	/** 최종 출력 보정. 필터와 클리핑으로 줄어든 음량을 되돌린다. */
+	constexpr float GRadioOutputGain = 1.5f;
+
+	/** 항상 깔리는 잡음(hiss)의 크기. 너무 크면 말소리를 덮는다. */
+	constexpr float GRadioNoiseLevel = 0.006f;
+
+	/** 일차 필터 계수를 차단 주파수에서 구한다. */
+	float MakeOnePoleCoefficient(float CutoffHz, float SampleRate)
+	{
+		// 표준 일차 RC 필터의 이산 근사. 정확한 응답보다 **싸고 안정적인 것**이
+		// 중요하다 - 이 계산은 설정할 때 한 번만 하지만, 필터 자체는
+		// 샘플마다 도는 자리이기 때문이다.
+		const float RC = 1.f / (2.f * PI * FMath::Max(CutoffHz, 1.f));
+		const float DT = 1.f / FMath::Max(SampleRate, 1.f);
+		return DT / (RC + DT);
+	}
+
+	/**
+	 * 소프트 클리핑. 하드 클리핑(단순 Clamp)보다 훨씬 자연스럽다.
+	 *
+	 * 하드 클리핑은 파형을 각지게 잘라 **날카로운 고조파**를 만든다 - 무전기가
+	 * 아니라 망가진 스피커처럼 들린다. 부드럽게 눌러야 "찌그러진 무전" 이 된다.
+	 */
+	float SoftClip(float Sample)
+	{
+		if (Sample > 1.f)  return 1.f;
+		if (Sample < -1.f) return -1.f;
+
+		// x - x^3/3 은 tanh 의 값싼 근사다. 렌더 스레드라 초월함수를 피한다.
+		return Sample - (Sample * Sample * Sample) / 3.f;
+	}
+}
+
+void UVoiceSynthComponent::SetRadioMode(float HearRadius)
+{
+	// 무전기 스피커의 감쇠는 근접과 성격이 다르다.
+	//
+	// ★ Radius(100% 구간)를 거의 0 으로 둔다 - **가까이 가야만 또렷하게** 들리고
+	//   조금만 떨어져도 웅얼거리게 만들기 위해서다(7-2절). 근접 음성은 반대로
+	//   가까운 거리에서 또렷한 구간이 넓다.
+	FSoundAttenuationSettings Settings;
+
+	Settings.bAttenuate  = true;
+	Settings.bSpatialize = true;
+	Settings.AttenuationShape = EAttenuationShape::Sphere;
+	Settings.AttenuationShapeExtents = FVector(0.f, 0.f, 0.f);
+	Settings.FalloffDistance = FMath::Max(HearRadius, 1.f);
+	Settings.DistanceAlgorithm = EAttenuationDistanceModel::NaturalSound;
+
+	// 근접과 같은 이유로 Silent 다 - 서버가 이 거리 밖으로 프레임을 안 보내므로,
+	// 클라 감쇠도 같은 지점에서 0 이 돼야 경계에서 뚝 끊기지 않는다.
+	Settings.FalloffMode = ENaturalSoundFalloffMode::Silent;
+
+	Settings.bAttenuateWithLPF = true;
+
+	// ★ 무전기 스피커는 차폐를 끄는 쪽을 먼저 고려한다(7-2절).
+	//   동시 발화자 수 = 트레이스 수인데, 무전은 여러 무전기가 동시에 울릴 수 있어
+	//   근접보다 소스가 많아지기 쉽다. 지금은 켜두고 프로파일링에서 걸리면 끈다.
+	Settings.bEnableOcclusion = true;
+
+	bAllowSpatialization = true;
+	bOverrideAttenuation = true;
+	AttenuationOverrides = Settings;
+
+	if (UAudioComponent* AudioComp = GetAudioComponent())
+	{
+		AudioComp->AdjustAttenuation(Settings);
+	}
+
+	bSpatialConfigured  = true;
+	bRadioFilterEnabled = true;
+}
+
+void UVoiceSynthComponent::ApplyRadioFilter(float* Audio, int32 NumSamples)
+{
+	// ★★ 오디오 렌더 스레드다. 할당·락·UObject·UE_LOG 전부 금지(헤더 상단).
+	//     아래는 float 산술과 멤버 상태 갱신뿐이다.
+
+	const float SampleRate = static_cast<float>(MOUVoice::SampleRate);
+
+	// 계수는 상수에서 나오므로 매번 같지만, 렌더 스레드에서 계산해도
+	// 나눗셈 두 번이라 무시할 수 있다. 미리 캐시하면 샘플레이트가 바뀔 때
+	// 갱신을 잊는 위험이 생겨서 오히려 손해다.
+	const float HighPassAlpha = MakeOnePoleCoefficient(GRadioHighPassHz, SampleRate);
+	const float LowPassAlpha  = MakeOnePoleCoefficient(GRadioLowPassHz, SampleRate);
+
+	for (int32 Index = 0; Index < NumSamples; ++Index)
+	{
+		float Sample = Audio[Index];
+
+		// 1) 하이패스 - 저음을 뺀다.
+		//    일차 로우패스로 저음 성분을 뽑아낸 뒤 원본에서 빼는 방식이다.
+		HighPassState += HighPassAlpha * (Sample - HighPassState);
+		Sample -= HighPassState;
+
+		// 2) 찌그러뜨린다. 대역을 좁힌 **뒤에** 해야 한다 -
+		//    먼저 찌그러뜨리면 거기서 생긴 고조파를 다음 필터가 도로 깎아낸다.
+		Sample = SoftClip(Sample * GRadioDriveGain);
+
+		// 3) 로우패스 두 단 - 고음을 깎는다.
+		//    한 단으로는 기울기가 완만해서 여전히 맑게 들린다. 두 번 겹쳐야
+		//    "작은 스피커에서 나오는" 느낌이 난다.
+		LowPassState1 += LowPassAlpha * (Sample - LowPassState1);
+		LowPassState2 += LowPassAlpha * (LowPassState1 - LowPassState2);
+		Sample = LowPassState2;
+
+		// 4) 잡음을 얹는다.
+		//    ★ 이게 무전기다움의 큰 부분이다 - 완전히 깨끗한 무음은
+		//      "기계를 통해 온 소리" 로 안 들린다.
+		//    난수는 직접 돌린다. FMath::Rand 는 전역 상태를 건드려
+		//    렌더 스레드에서 부르면 안 된다.
+		NoiseSeed = NoiseSeed * 1664525u + 1013904223u;
+		const float Noise = (static_cast<float>(NoiseSeed >> 8) / 8388608.f) - 1.f; // -1~1
+		Sample += Noise * GRadioNoiseLevel;
+
+		// 5) 음량을 되돌리고 최종 안전 클램프.
+		Audio[Index] = FMath::Clamp(Sample * GRadioOutputGain, -1.f, 1.f);
+	}
+}
+
 bool UVoiceSynthComponent::Init(int32& SampleRate)
 {
 	// 오디오 엔진에게 "나는 16kHz 로 낸다" 고 알린다.
@@ -195,6 +334,15 @@ int32 UVoiceSynthComponent::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 		// 언더런 카운트. 말하고 있지 않을 때는 정상적으로 계속 오르므로,
 		// "발화 중인데 오르는지" 로 판단해야 한다.
 		UnderrunCounter.Increment();
+	}
+
+	// 무전 톤은 **무음 구간에도** 걸어야 한다.
+	//
+	// 잡음(hiss)이 말할 때만 나면 오히려 어색하다 - 실제 무전기는 켜져 있는 동안
+	// 계속 지직거린다. 그래서 Popped 가 아니라 NumSamples 전체에 건다.
+	if (bRadioFilterEnabled)
+	{
+		ApplyRadioFilter(OutAudio, NumSamples);
 	}
 
 	// 모자란 부분도 무음으로 채웠으므로 요청받은 만큼 전부 채운 것이다.

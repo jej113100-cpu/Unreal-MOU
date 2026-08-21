@@ -19,6 +19,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 public:
 	virtual void Tick(float DeltaTime) override;
@@ -46,9 +47,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Push")
 	bool bShowDebugPushDistance = false;
 
-	// 현재 이 상자를 잡고(밀고) 있는 캐릭터 목록
-	UPROPERTY(BlueprintReadOnly, Category = "Push")
-	TArray<class AMainCharacter*> CurrentPushers;
+	// 현재 이 상자를 잡고(밀고) 있는 캐릭터 목록 (서버에서 관리 및 모든 클라이언트에 복제)
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Push")
+	TArray<TObjectPtr<class AMainCharacter>> CurrentPushers;
 
 	// 밀기 모드 진입/해제 시 호출
 	void AddPusher(class AMainCharacter* Pusher);

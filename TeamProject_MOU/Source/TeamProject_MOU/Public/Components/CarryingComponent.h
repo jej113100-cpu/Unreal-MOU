@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "GameplayAbilitySpecHandle.h"
 #include "CarryingComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCarriedStateChanged, AActor*, CarriedActor);
@@ -53,6 +54,10 @@ public:
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastClearCarriedItem();
 
+	// 손에 든 물건과 인벤토리 슬롯 아이템의 총 무게를 계산하여 AttributeSet에 동기화
+	UFUNCTION(BlueprintCallable, Category = "Carrying")
+	void UpdateCharacterTotalWeight();
+
 	UPROPERTY(BlueprintAssignable, Category = "Carrying")
 	FOnCarriedStateChanged OnCarriedStateChanged;
 
@@ -69,4 +74,7 @@ private:
 
 	UFUNCTION()
 	void OnRep_CarriedActor(AActor* OldCarriedActor);
+
+	UPROPERTY(Transient)
+	struct FGameplayAbilitySpecHandle ActiveCarryAbilitySpecHandle;
 };

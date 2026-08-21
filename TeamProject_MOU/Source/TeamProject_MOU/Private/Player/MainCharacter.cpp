@@ -15,7 +15,20 @@
 #include "Components/InventoryComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/WidgetComponent.h"
+#include "Ability/GA_Sprint.h"
+#include "Ability/GA_PushObject.h"
+#include "Ability/GA_CarryItem.h"
+#include "Ability/GA_HeavyCarry.h"
+#include "Ability/GA_CoopCarry.h"
+#include "Ability/GA_CarryCharacter.h"
+#include "Ability/GA_Revive.h"
+#include "Ability/GA_ThrowItem.h"
+#include "Ability/GA_Emote.h"
+#include "Ability/GA_Jump.h"
+#include "Ability/GA_EquipSlot.h"
+#include "Ability/GA_Interact.h"
+#include "Ability/GA_Groggy.h"
+#include "Ability/GA_Death.h"
 
 AMainCharacter::AMainCharacter()
 {
@@ -25,14 +38,6 @@ AMainCharacter::AMainCharacter()
 	InteractionComponent = CreateDefaultSubobject<UInteractionComponent>(TEXT("InteractionComponent"));
 	CarryingComponent = CreateDefaultSubobject<UCarryingComponent>(TEXT("CarryingComponent"));
 	InventoryComponent = CreateDefaultSubobject<UInventoryComponent>(TEXT("InventoryComponent"));
-
-	// 부활(살리기) 위젯 컴포넌트 생성 및 초기화
-	ReviveWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("ReviveWidgetComponent"));
-	ReviveWidgetComponent->SetupAttachment(RootComponent);
-	ReviveWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen); // 화면 공간에 띄움
-	ReviveWidgetComponent->SetDrawSize(FVector2D(200.0f, 50.0f));
-	ReviveWidgetComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 100.0f)); // 머리 위쪽에 위치
-	ReviveWidgetComponent->SetVisibility(false); // 기본적으로는 숨김
 
 	// 시야(상호작용) Trace가 캐릭터를 인식할 수 있도록 Visibility 채널 Block 처리
 	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
@@ -66,6 +71,36 @@ void AMainCharacter::BeginPlay()
 	{
 		InventoryComponent->OnEquipRequested.AddDynamic(this, &AMainCharacter::OnEquipRequested);
 	}
+
+	if (HasAuthority() && AbilitySystemComponent)
+	{
+		TSubclassOf<UGameplayAbility> SprintClass = SprintAbilityClass ? SprintAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Sprint::StaticClass());
+		SprintAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(SprintClass, 1));
+
+		TSubclassOf<UGameplayAbility> PushClass = PushAbilityClass ? PushAbilityClass : TSubclassOf<UGameplayAbility>(UGA_PushObject::StaticClass());
+		PushAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(PushClass, 1));
+
+		TSubclassOf<UGameplayAbility> ReviveClass = ReviveAbilityClass ? ReviveAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Revive::StaticClass());
+		ReviveAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(ReviveClass, 1));
+
+		TSubclassOf<UGameplayAbility> ThrowClass = ThrowAbilityClass ? ThrowAbilityClass : TSubclassOf<UGameplayAbility>(UGA_ThrowItem::StaticClass());
+		ThrowAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(ThrowClass, 1));
+
+		TSubclassOf<UGameplayAbility> EmoteClass = EmoteAbilityClass ? EmoteAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Emote::StaticClass());
+		EmoteAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(EmoteClass, 1));
+
+		TSubclassOf<UGameplayAbility> JumpClass = JumpAbilityClass ? JumpAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Jump::StaticClass());
+		JumpAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(JumpClass, 1));
+
+		TSubclassOf<UGameplayAbility> InteractClass = InteractAbilityClass ? InteractAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Interact::StaticClass());
+		InteractAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(InteractClass, 1));
+
+		TSubclassOf<UGameplayAbility> GroggyClass = GroggyAbilityClass ? GroggyAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Groggy::StaticClass());
+		GroggyAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(GroggyClass, 1));
+
+		TSubclassOf<UGameplayAbility> DeathClass = DeathAbilityClass ? DeathAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Death::StaticClass());
+		DeathAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(DeathClass, 1));
+	}
 }
 
 void AMainCharacter::Tick(float DeltaTime)
@@ -74,6 +109,39 @@ void AMainCharacter::Tick(float DeltaTime)
 
 	// 매 프레임 스태미나 소모 및 회복 처리
 	UpdateStamina(DeltaTime);
+
+	// [팀원 부활 차징 처리]
+	if (bIsHoldingRevive)
+	{
+		if (!CurrentReviveTarget.IsValid() || !CurrentReviveTarget->bIsGroggy || CurrentReviveTarget->bIsDead)
+		{
+			CancelReviveHold();
+		}
+		else
+		{
+			// 거리 검사 (300 유닛 이상 멀어지면 차징 취소)
+			float DistSq = FVector::DistSquared(GetActorLocation(), CurrentReviveTarget->GetActorLocation());
+			const float MaxReviveDistSq = FMath::Square(300.0f);
+
+			if (DistSq > MaxReviveDistSq)
+			{
+				CancelReviveHold();
+			}
+			else
+			{
+				CurrentReviveHoldTime += DeltaTime;
+				float Progress = GetReviveProgress();
+
+				OnReviveHoldProgress(Progress);
+				CurrentReviveTarget->SetReviveProgress(Progress);
+
+				if (CurrentReviveHoldTime >= GetRequiredReviveTime())
+				{
+					CompleteReviveHold();
+				}
+			}
+		}
+	}
 
 	// [밀기 모드] 캐릭터의 실제 이동량만큼 이벤트 오브젝트를 함께 이동시킴
 	// Simulated Proxy(다른 클라이언트 화면에 보이는 타 플레이어)는 서버의 복제를 따라가므로 이 로직을 실행하지 않음
@@ -84,7 +152,8 @@ void AMainCharacter::Tick(float DeltaTime)
 		DeltaMove.Z = 0.0f; // 상하 이동은 무시
 
 		bool bCanMove = true;
-		if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
+		AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject);
+		if (EventObj)
 		{
 			bCanMove = EventObj->IsReadyToMove();
 		}
@@ -93,7 +162,7 @@ void AMainCharacter::Tick(float DeltaTime)
 		{
 			if (!DeltaMove.IsNearlyZero())
 			{
-				// 인원 부족: 애니메이션은 나오지만 캐릭터의 실제 위치는 이전으로 강제 고정
+				// 인원 부족 또는 입력 불일치: 애니메이션은 나오지만 캐릭터의 실제 위치는 이전으로 강제 고정
 				SetActorLocation(LastCharacterLocation, false);
 			}
 			return;
@@ -101,51 +170,59 @@ void AMainCharacter::Tick(float DeltaTime)
 
 		if (bCanMove && !DeltaMove.IsNearlyZero())
 		{
-			// 0. 장애물(다른 상자나 벽) 감지 (바닥/경사면은 무시)
-			FVector BoxCenter, BoxExtents;
-			CurrentPushedObject->GetActorBounds(false, BoxCenter, BoxExtents);
-			
-			// 바닥 긁힘 방지를 위해 살짝 위(10cm)에서 전방으로 검사
-			FVector TraceStart = BoxCenter + FVector(0, 0, 10.0f);
-			FVector TraceEnd = TraceStart + DeltaMove;
-			
-			FCollisionQueryParams BoxParams;
-			BoxParams.AddIgnoredActor(CurrentPushedObject);
-			BoxParams.AddIgnoredActor(this);
-			
-			FHitResult BoxHit;
-			// 상자보다 아주 살짝 작은 크기의 박스로 Sweep
-			bool bHitObstacle = GetWorld()->SweepSingleByChannel(
-				BoxHit, TraceStart, TraceEnd, 
-				CurrentPushedObject->GetActorQuat(), ECC_Visibility, 
-				FCollisionShape::MakeBox(BoxExtents * 0.95f), BoxParams);
-				
-			// 수직 장애물에 부딪혔을 때만 멈춤 (경사면 무시)
-			if (bHitObstacle && FMath::Abs(BoxHit.ImpactNormal.Z) < 0.5f)
+			// 협동 밀기 시 여러 명이 동시에 상자 위치를 중복 적용(2배속/N배속 가속)하지 않도록,
+			// 첫 번째 푸셔(또는 단독 푸셔)만 상자를 이동시키고 낭떠러지 추락을 검사함
+			bool bIsPrimaryPusher = true;
+			if (EventObj && EventObj->CurrentPushers.Num() > 0)
 			{
-				// 전방에 벽이나 다른 상자가 있으므로 캐릭터의 이동 취소
-				SetActorLocation(LastCharacterLocation, false);
-				return;
+				bIsPrimaryPusher = (EventObj->CurrentPushers[0] == this);
 			}
 
-			// 1. 경사면 이동 완벽 허용을 위해 Sweep 끄고 이동 적용 (장애물은 위에서 걸러냄)
-			CurrentPushedObject->AddActorWorldOffset(DeltaMove, false);
-
-			// 2. 바닥 감지 (낭떠러지 체크)
-			FVector TraceStartFall = BoxCenter;
-			FVector TraceEndFall = TraceStartFall - FVector(0, 0, BoxExtents.Z + 50.0f); // 상자 바닥에서 50cm 아래 검사
-			FHitResult FallHit;
-			FCollisionQueryParams FallParams;
-			FallParams.AddIgnoredActor(CurrentPushedObject);
-			FallParams.AddIgnoredActor(this);
-
-			bool bHitFall = GetWorld()->LineTraceSingleByChannel(FallHit, TraceStartFall, TraceEndFall, ECC_Visibility, FallParams);
-			if (!bHitFall)
+			if (bIsPrimaryPusher)
 			{
-				// 바닥이 없으면 추락 처리 (서버에서만 판정하여 모두에게 동기화)
-				if (HasAuthority())
+				// 0. 장애물(다른 상자나 벽) 감지 (바닥/경사면은 무시)
+				FVector BoxCenter, BoxExtents;
+				CurrentPushedObject->GetActorBounds(false, BoxCenter, BoxExtents);
+				
+				// 바닥 긁힘 방지를 위해 살짝 위(10cm)에서 전방으로 검사
+				FVector TraceStart = BoxCenter + FVector(0, 0, 10.0f);
+				FVector TraceEnd = TraceStart + DeltaMove;
+				
+				FCollisionQueryParams BoxParams;
+				BoxParams.AddIgnoredActor(CurrentPushedObject);
+				BoxParams.AddIgnoredActor(this);
+				
+				FHitResult BoxHit;
+				// 상자보다 아주 살짝 작은 크기의 박스로 Sweep
+				bool bHitObstacle = GetWorld()->SweepSingleByChannel(
+					BoxHit, TraceStart, TraceEnd, 
+					CurrentPushedObject->GetActorQuat(), ECC_Visibility, 
+					FCollisionShape::MakeBox(BoxExtents * 0.95f), BoxParams);
+					
+				// 수직 장애물에 부딪혔을 때만 멈춤 (경사면 무시)
+				if (bHitObstacle && FMath::Abs(BoxHit.ImpactNormal.Z) < 0.5f)
 				{
-					if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
+					// 전방에 벽이나 다른 상자가 있으므로 캐릭터의 이동 취소
+					SetActorLocation(LastCharacterLocation, false);
+					return;
+				}
+
+				// 1. 경사면 이동 완벽 허용을 위해 Sweep 끄고 이동 적용 (장애물은 위에서 걸러냄)
+				CurrentPushedObject->AddActorWorldOffset(DeltaMove, false);
+
+				// 2. 바닥 감지 (낭떠러지 체크)
+				FVector TraceStartFall = BoxCenter;
+				FVector TraceEndFall = TraceStartFall - FVector(0, 0, BoxExtents.Z + 50.0f); // 상자 바닥에서 50cm 아래 검사
+				FHitResult FallHit;
+				FCollisionQueryParams FallParams;
+				FallParams.AddIgnoredActor(CurrentPushedObject);
+				FallParams.AddIgnoredActor(this);
+
+				bool bHitFall = GetWorld()->LineTraceSingleByChannel(FallHit, TraceStartFall, TraceEndFall, ECC_Visibility, FallParams);
+				if (!bHitFall)
+				{
+					// 바닥이 없으면 추락 처리 (서버에서만 판정하여 모두에게 동기화)
+					if (HasAuthority())
 					{
 						EventObj->MulticastFallOffLedge();
 					}
@@ -206,6 +283,8 @@ void AMainCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME(AMainCharacter, bIsSprinting);
 	DOREPLIFETIME(AMainCharacter, bIsStunned);
 	DOREPLIFETIME(AMainCharacter, bIsPushingMode);
+	DOREPLIFETIME(AMainCharacter, CurrentPushedObject);
+	DOREPLIFETIME(AMainCharacter, CurrentPushInput);
 	DOREPLIFETIME(AMainCharacter, DownCount);
 	DOREPLIFETIME(AMainCharacter, bIsGroggy);
 	DOREPLIFETIME(AMainCharacter, bIsDead);
@@ -226,6 +305,8 @@ void AMainCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 	if (InteractAction)
 	{
 		EnhancedInputComponent->BindAction(InteractAction, ETriggerEvent::Started, this, &AMainCharacter::OnInteract);
+		EnhancedInputComponent->BindAction(InteractAction, ETriggerEvent::Completed, this, &AMainCharacter::OnInteractEnd);
+		EnhancedInputComponent->BindAction(InteractAction, ETriggerEvent::Canceled, this, &AMainCharacter::OnInteractEnd);
 	}
 
 	// E키: 물건 잡기 / 놓기
@@ -294,10 +375,18 @@ void AMainCharacter::DoMove(float Right, float Forward)
 	{
 		Right = 0.0f;
 
-		bool bCanMove = true;
-		if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
+		// 입력 상태 동기화 (+1.0: 밀기(전진), -1.0: 당기기(후진), 0.0: 정지)
+		float NewInput = 0.0f;
+		if (Forward > 0.1f) NewInput = 1.0f;
+		else if (Forward < -0.1f) NewInput = -1.0f;
+
+		if (!FMath::IsNearlyEqual(CurrentPushInput, NewInput))
 		{
-			bCanMove = EventObj->IsReadyToMove();
+			CurrentPushInput = NewInput;
+			if (!HasAuthority())
+			{
+				ServerSetPushInput(NewInput);
+			}
 		}
 
 		// 인원수 충족 여부에 관계없이 상시 이동 입력을 주어 헛발질(애니메이션)이 재생되게 함
@@ -336,6 +425,12 @@ void AMainCharacter::OnFocusedActorChanged(AActor* NewFocusedActor)
 	if (CarryingComponent && CarryingComponent->IsCarrying())
 	{
 		PreviousFocusedActor = nullptr;
+		if (bIsAimingAtGroggyTarget)
+		{
+			bIsAimingAtGroggyTarget = false;
+			FocusedGroggyTarget = nullptr;
+			OnReviveTargetAimChanged(false, nullptr);
+		}
 		return;
 	}
 
@@ -343,6 +438,29 @@ void AMainCharacter::OnFocusedActorChanged(AActor* NewFocusedActor)
 	if (AItemBase* NewItem = Cast<AItemBase>(NewFocusedActor))
 	{
 		NewItem->ShowItemInfo();
+	}
+
+	// 새 포커스 액터가 그로기 상태의 팀원인지 확인
+	if (AMainCharacter* TargetChar = Cast<AMainCharacter>(NewFocusedActor))
+	{
+		if (TargetChar->bIsGroggy && !TargetChar->bIsDead && TargetChar != this)
+		{
+			bIsAimingAtGroggyTarget = true;
+			FocusedGroggyTarget = TargetChar;
+			OnReviveTargetAimChanged(true, TargetChar);
+		}
+		else if (bIsAimingAtGroggyTarget)
+		{
+			bIsAimingAtGroggyTarget = false;
+			FocusedGroggyTarget = nullptr;
+			OnReviveTargetAimChanged(false, nullptr);
+		}
+	}
+	else if (bIsAimingAtGroggyTarget)
+	{
+		bIsAimingAtGroggyTarget = false;
+		FocusedGroggyTarget = nullptr;
+		OnReviveTargetAimChanged(false, nullptr);
 	}
 
 	PreviousFocusedActor = NewFocusedActor;
@@ -368,9 +486,7 @@ void AMainCharacter::OnInteract()
 		return;
 	}
 
-	// 행동 불가능(기절/잡힘) 상태 체크 (그로기/사망 상태에서도 대상 구도자는 살릴 수 있어야 함)
-	// CanAct() 란 오직 자신의 상태만 보군도, 살리는 조작은 있어야 함
-	// [수정] 자신이 그로기 또는 사망 상태일 때만 자신의 행동 차단
+	// 행동 불가능(기절/그로기/사망) 상태 체크
 	if (bIsGroggy || bIsDead)
 	{
 		return;
@@ -378,23 +494,32 @@ void AMainCharacter::OnInteract()
 
 	if (InteractionComponent)
 	{
-		// 다른 캐릭터 살리기 케이스: 대상이 그로기 상태의 MainCharacter이면 Server RPC로 처리
+		// 다른 캐릭터 살리기 케이스: 대상이 그로기 상태의 MainCharacter이면 홀드 차징 시작
 		AActor* Focused = InteractionComponent->GetFocusedInteractable();
 		if (AMainCharacter* GroggyTarget = Cast<AMainCharacter>(Focused))
 		{
-			if (GroggyTarget->bIsGroggy && !GroggyTarget->bIsDead)
+			if (GroggyTarget->bIsGroggy && !GroggyTarget->bIsDead && GroggyTarget != this)
 			{
-				ServerReviveTarget(GroggyTarget);
+				StartReviveHold(GroggyTarget);
 				return;
 			}
 		}
 
-		// 일반 상호작용 (밀기, 풌스트, 레벨이동 등)
+		// 일반 상호작용 (밀기, 퀘스트, 레벨이동, NPC 대화 등)
 		if (!CanAct())
 		{
 			return;
 		}
 		InteractionComponent->PerformInteraction();
+	}
+}
+
+void AMainCharacter::OnInteractEnd()
+{
+	// 상호작용 키를 뗐을 때 부활 차징 중이었다면 취소
+	if (bIsHoldingRevive)
+	{
+		CancelReviveHold();
 	}
 }
 
@@ -425,7 +550,19 @@ void AMainCharacter::OnThrow()
 		return;
 	}
 
-	if (CarryingComponent)
+	if (AbilitySystemComponent)
+	{
+		if (ThrowAbilitySpecHandle.IsValid())
+		{
+			AbilitySystemComponent->TryActivateAbility(ThrowAbilitySpecHandle);
+		}
+		else
+		{
+			static const FGameplayTagContainer ThrowTagContainer(FGameplayTag::RequestGameplayTag(FName("Ability.Player.Throw")));
+			AbilitySystemComponent->TryActivateAbilitiesByTag(ThrowTagContainer);
+		}
+	}
+	else if (CarryingComponent)
 	{
 		CarryingComponent->Throw();
 	}
@@ -433,44 +570,56 @@ void AMainCharacter::OnThrow()
 
 void AMainCharacter::OnSprintStart()
 {
-	// 그로기 / 사망 / 부활중 상태에서는 달리기 차단
-	if (!CanAct())
+	if (!CanMove() || bIsPushingMode)
 	{
 		bIsSprinting = false;
 		return;
 	}
 
-	// 밀기 모드 중 달리기 시도 시 자동 해제
-	if (bIsPushingMode)
+	if (AbilitySystemComponent)
 	{
-		StopPushMode();
-	}
+		static const FGameplayTag BlockSprintTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Block.Sprint"), false);
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+		static const FGameplayTag OverloadedTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Overloaded"), false);
+		static const FGameplayTag ImmobileTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Immobile"), false);
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+		static const FGameplayTag GroggyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Groggy"), false);
+		static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
+		static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
 
-	// StatusComponent의 CanSprint() 판단 (기절/스태미나 고갈 시 불가)
-	if (StatusComponent && !StatusComponent->CanSprint())
-	{
-		bIsSprinting = false;
-		return;
-	}
-
-	// [개선] 무거운 택배를 들고 있을 때는 달리기 불가
-	if (CarryingComponent && CarryingComponent->IsCarrying())
-	{
-		if (APackageBase* Package = Cast<APackageBase>(CarryingComponent->GetCarriedActor()))
+		if ((BlockSprintTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockSprintTag)) ||
+			(HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag)) ||
+			(OverloadedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(OverloadedTag)) ||
+			(ImmobileTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(ImmobileTag)) ||
+			(PushingTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(PushingTag)) ||
+			(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
+			(DeadTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(DeadTag)) ||
+			(StunnedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(StunnedTag)))
 		{
-			if (Package->PackageType == EPackageType::Heavy)
-			{
-				bIsSprinting = false;
-				return;
-			}
+			bIsSprinting = false;
+			return;
+		}
+
+		bool bActivated = false;
+		if (SprintAbilitySpecHandle.IsValid())
+		{
+			bActivated = AbilitySystemComponent->TryActivateAbility(SprintAbilitySpecHandle);
+		}
+		else
+		{
+			static const FGameplayTagContainer SprintTagContainer(FGameplayTag::RequestGameplayTag(FName("Ability.Player.Sprint")));
+			bActivated = AbilitySystemComponent->TryActivateAbilitiesByTag(SprintTagContainer);
+		}
+
+		if (!bActivated)
+		{
+			bIsSprinting = false;
+			return;
 		}
 	}
 
-	// 클라이언트 측 예측 (즉시 달리기 적용)
 	bIsSprinting = true;
-	GetCharacterMovement()->MaxWalkSpeed = SprintWalkSpeed;
 
-	// 서버로 달리기 요청 전송
 	if (!HasAuthority())
 	{
 		ServerSetSprinting(true);
@@ -479,11 +628,21 @@ void AMainCharacter::OnSprintStart()
 
 void AMainCharacter::OnSprintEnd()
 {
-	// 클라이언트 측 즉시 달리기 중지 적용
 	bIsSprinting = false;
-	GetCharacterMovement()->MaxWalkSpeed = NormalWalkSpeed;
 
-	// 서버로 달리기 중지 요청 전송
+	if (AbilitySystemComponent)
+	{
+		if (SprintAbilitySpecHandle.IsValid())
+		{
+			AbilitySystemComponent->CancelAbilityHandle(SprintAbilitySpecHandle);
+		}
+		else
+		{
+			static const FGameplayTagContainer SprintTagContainer(FGameplayTag::RequestGameplayTag(FName("Ability.Player.Sprint")));
+			AbilitySystemComponent->CancelAbilities(&SprintTagContainer);
+		}
+	}
+
 	if (!HasAuthority())
 	{
 		ServerSetSprinting(false);
@@ -494,44 +653,111 @@ void AMainCharacter::ServerSetSprinting_Implementation(bool bSprint)
 {
 	if (bSprint)
 	{
-		if (StatusComponent && !StatusComponent->CanSprint())
+		if (!CanMove() || bIsPushingMode)
 		{
 			bIsSprinting = false;
-			return; // 달리기 불가
+			return;
 		}
 
-		// [개선] 무거운 택배를 들고 있을 때는 달리기 불가
-		if (CarryingComponent && CarryingComponent->IsCarrying())
+		if (AbilitySystemComponent)
 		{
-			if (APackageBase* Package = Cast<APackageBase>(CarryingComponent->GetCarriedActor()))
+			static const FGameplayTag BlockSprintTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Block.Sprint"), false);
+			static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+			static const FGameplayTag OverloadedTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Overloaded"), false);
+			static const FGameplayTag ImmobileTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Immobile"), false);
+			static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+			static const FGameplayTag GroggyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Groggy"), false);
+			static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
+			static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
+
+			if ((BlockSprintTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockSprintTag)) ||
+				(HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag)) ||
+				(OverloadedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(OverloadedTag)) ||
+				(ImmobileTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(ImmobileTag)) ||
+				(PushingTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(PushingTag)) ||
+				(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
+				(DeadTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(DeadTag)) ||
+				(StunnedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(StunnedTag)))
 			{
-				if (Package->PackageType == EPackageType::Heavy)
-				{
-					bIsSprinting = false;
-					return;
-				}
+				bIsSprinting = false;
+				return;
+			}
+
+			if (SprintAbilitySpecHandle.IsValid())
+			{
+				AbilitySystemComponent->TryActivateAbility(SprintAbilitySpecHandle);
+			}
+			else
+			{
+				static const FGameplayTagContainer SprintTagContainer(FGameplayTag::RequestGameplayTag(FName("Ability.Player.Sprint")));
+				AbilitySystemComponent->TryActivateAbilitiesByTag(SprintTagContainer);
 			}
 		}
 
 		bIsSprinting = true;
-		GetCharacterMovement()->MaxWalkSpeed = SprintWalkSpeed;
 	}
 	else
 	{
 		bIsSprinting = false;
-		GetCharacterMovement()->MaxWalkSpeed = NormalWalkSpeed;
+
+		if (AbilitySystemComponent)
+		{
+			if (SprintAbilitySpecHandle.IsValid())
+			{
+				AbilitySystemComponent->CancelAbilityHandle(SprintAbilitySpecHandle);
+			}
+			else
+			{
+				static const FGameplayTagContainer SprintTagContainer(FGameplayTag::RequestGameplayTag(FName("Ability.Player.Sprint")));
+				AbilitySystemComponent->CancelAbilities(&SprintTagContainer);
+			}
+		}
 	}
 }
 
 void AMainCharacter::OnJumpStartInput()
 {
-	// 밀기 모드 중 점프 시도 시 자동 해제
-	if (bIsPushingMode)
+	// 밀기 모드 중이거나 행동 불가 상태일 때는 점프 차단
+	if (!CanMove() || bIsPushingMode)
 	{
-		StopPushMode();
+		return;
 	}
 
-	DoJumpStart();
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag BlockJumpTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Block.Jump"), false);
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+		static const FGameplayTag ImmobileTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Immobile"), false);
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+		static const FGameplayTag GroggyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Groggy"), false);
+		static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
+		static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
+
+		if ((BlockJumpTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockJumpTag)) ||
+			(HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag)) ||
+			(ImmobileTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(ImmobileTag)) ||
+			(PushingTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(PushingTag)) ||
+			(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
+			(DeadTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(DeadTag)) ||
+			(StunnedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(StunnedTag)))
+		{
+			return; // 점프 차단
+		}
+
+		if (JumpAbilitySpecHandle.IsValid())
+		{
+			AbilitySystemComponent->TryActivateAbility(JumpAbilitySpecHandle);
+		}
+		else
+		{
+			static const FGameplayTagContainer JumpTagContainer(FGameplayTag::RequestGameplayTag(FName("Ability.Player.Jump")));
+			AbilitySystemComponent->TryActivateAbilitiesByTag(JumpTagContainer);
+		}
+	}
+	else
+	{
+		DoJumpStart();
+	}
 }
 
 void AMainCharacter::OnJumpEndInput()
@@ -566,17 +792,59 @@ void AMainCharacter::OnUse()
 
 void AMainCharacter::OnSlot1()
 {
-	if (InventoryComponent) InventoryComponent->RequestSlotAction(0);
+	if (!CanAct() || bIsPushingMode) return;
+
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+		if (HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag))
+		{
+			return; // 무거운 택배 운반 중 슬롯 교체 차단
+		}
+	}
+
+	if (InventoryComponent)
+	{
+		InventoryComponent->RequestSlotAction(0);
+	}
 }
 
 void AMainCharacter::OnSlot2()
 {
-	if (InventoryComponent) InventoryComponent->RequestSlotAction(1);
+	if (!CanAct() || bIsPushingMode) return;
+
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+		if (HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag))
+		{
+			return; // 무거운 택배 운반 중 슬롯 교체 차단
+		}
+	}
+
+	if (InventoryComponent)
+	{
+		InventoryComponent->RequestSlotAction(1);
+	}
 }
 
 void AMainCharacter::OnSlot3()
 {
-	if (InventoryComponent) InventoryComponent->RequestSlotAction(2);
+	if (!CanAct() || bIsPushingMode) return;
+
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+		if (HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag))
+		{
+			return; // 무거운 택배 운반 중 슬롯 교체 차단
+		}
+	}
+
+	if (InventoryComponent)
+	{
+		InventoryComponent->RequestSlotAction(2);
+	}
 }
 
 void AMainCharacter::OnEquipRequested(AItemBase* ItemToEquip)
@@ -613,7 +881,7 @@ void AMainCharacter::UpdateStamina(float DeltaTime)
 			// 쿨다운 종료 시 Exhausted 상태 태그 제거 (서버 권한)
 			if (HasAuthority() && StatusComponent)
 			{
-				static const FGameplayTag ExhaustedTag = FGameplayTag::RequestGameplayTag(FName("State.Exhausted"), false);
+				static const FGameplayTag ExhaustedTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Exhausted"), false);
 				StatusComponent->RemoveStatusTag(ExhaustedTag);
 			}
 		}
@@ -639,10 +907,10 @@ void AMainCharacter::UpdateStamina(float DeltaTime)
 		{
 			OnSprintEnd();
 
-			// State.Exhausted 태그 부여 및 쿨다운 시작
+			// State.Player.Exhausted 태그 부여 및 쿨다운 시작
 			if (StatusComponent)
 			{
-				static const FGameplayTag ExhaustedTag = FGameplayTag::RequestGameplayTag(FName("State.Exhausted"), false);
+				static const FGameplayTag ExhaustedTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Exhausted"), false);
 				StatusComponent->AddStatusTag(ExhaustedTag);
 			}
 
@@ -666,9 +934,35 @@ void AMainCharacter::UpdateStamina(float DeltaTime)
 
 void AMainCharacter::OnEmoteToggle()
 {
-	if (!CanAct())
+	if (!CanAct() || bIsGroggy || bIsDead)
 	{
 		return;
+	}
+
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag BlockEmoteTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Block.Emote"), false);
+		static const FGameplayTag GroggyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Groggy"), false);
+		static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
+		static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
+		static const FGameplayTag HeldTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Held"), false);
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+
+		if ((BlockEmoteTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockEmoteTag)) ||
+			(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
+			(DeadTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(DeadTag)) ||
+			(StunnedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(StunnedTag)) ||
+			(HeldTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeldTag)) ||
+			(HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag)))
+		{
+			return; // 이모트 UI 열기 차단
+		}
+	}
+
+	// [개선] 밀기 모드 중 이모트 UI 열기 시 밀기 모드 자동 해제
+	if (bIsPushingMode)
+	{
+		StopPushMode();
 	}
 
 	// 블루프린트에서 UI 위젯을 띄우는 이벤트를 호출
@@ -689,9 +983,35 @@ void AMainCharacter::SetEmotion(int32 EmotionIndex, FLinearColor EmoteColor)
 
 void AMainCharacter::PlayEmote(UAnimMontage* EmoteMontage, int32 EmotionIndex, FLinearColor EmoteColor)
 {
-	if (!EmoteMontage || !GetMesh() || !GetMesh()->GetAnimInstance())
+	if (!EmoteMontage || !GetMesh() || !GetMesh()->GetAnimInstance() || !CanAct() || bIsGroggy || bIsDead)
 	{
 		return;
+	}
+
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag BlockEmoteTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Block.Emote"), false);
+		static const FGameplayTag GroggyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Groggy"), false);
+		static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
+		static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
+		static const FGameplayTag HeldTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Held"), false);
+		static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+
+		if ((BlockEmoteTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockEmoteTag)) ||
+			(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
+			(DeadTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(DeadTag)) ||
+			(StunnedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(StunnedTag)) ||
+			(HeldTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeldTag)) ||
+			(HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag)))
+		{
+			return; // 이모트 재생 차단
+		}
+	}
+
+	// [개선] 밀기 모드 중 이모트 실행 시 밀기 모드 자동 해제
+	if (bIsPushingMode)
+	{
+		StopPushMode();
 	}
 
 	// [이모트 사용 시 자동 Drop] 물건을 들고 있는 상태라면 먼저 내려놓음
@@ -712,6 +1032,29 @@ void AMainCharacter::PlayEmote(UAnimMontage* EmoteMontage, int32 EmotionIndex, F
 
 void AMainCharacter::ServerPlayEmote_Implementation(UAnimMontage* EmoteMontage, int32 EmotionIndex, FLinearColor EmoteColor)
 {
+	if (!CanAct() || bIsGroggy || bIsDead)
+	{
+		return;
+	}
+
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag BlockEmoteTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Block.Emote"), false);
+		static const FGameplayTag GroggyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Groggy"), false);
+		static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
+		static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
+		static const FGameplayTag HeldTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Held"), false);
+
+		if ((BlockEmoteTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockEmoteTag)) ||
+			(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
+			(DeadTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(DeadTag)) ||
+			(StunnedTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(StunnedTag)) ||
+			(HeldTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeldTag)))
+		{
+			return;
+		}
+	}
+
 	MulticastPlayEmote(EmoteMontage, EmotionIndex, EmoteColor);
 }
 
@@ -780,7 +1123,7 @@ bool AMainCharacter::CanAct() const
 
 bool AMainCharacter::CanMove() const
 {
-	if (bIsStunned || bIsGroggy || bIsDead || bIsReviving)
+	if (bIsStunned || bIsGroggy || bIsDead || bIsReviving || bIsHoldingRevive)
 	{
 		return false;
 	}
@@ -801,6 +1144,12 @@ void AMainCharacter::Knockdown()
 	}
 
 	bIsStunned = true;
+
+	// 부활 차징 중이었다면 취소
+	if (bIsHoldingRevive)
+	{
+		CancelReviveHold();
+	}
 
 	// 물건을 들고 있었다면 떨어뜨림 (GrabOrDrop은 서버에서만 호출해야 함)
 	if (CarryingComponent && CarryingComponent->IsCarrying())
@@ -867,62 +1216,63 @@ void AMainCharacter::HandleHealthZero()
 
 	if (DownCount == 0 && !bIsGroggy)
 	{
-		// 첫 번째 다운 (그로기)
-		DownCount = 1;
-		bIsGroggy = true;
-
-		// 들고 있던 물건 떨어뜨리기
-		if (CarryingComponent && CarryingComponent->IsCarrying())
+		// 부활 차징 중이었다면 취소
+		if (bIsHoldingRevive)
 		{
-			CarryingComponent->GrabOrDrop();
-		}
-		
-		// 달리기 취소
-		bIsSprinting = false;
-		GetCharacterMovement()->MaxWalkSpeed = NormalWalkSpeed;
-		if (!HasAuthority())
-		{
-			ServerSetSprinting(false);
+			CancelReviveHold();
 		}
 
-		// 모든 클라이언트에 블루프린트 이벤트 방송 (표정 변경)
-		MulticastOnEnterGroggy();
+		if (AbilitySystemComponent && GroggyAbilitySpecHandle.IsValid())
+		{
+			AbilitySystemComponent->TryActivateAbility(GroggyAbilitySpecHandle);
+		}
+		else
+		{
+			// 첫 번째 다운 (그로기) 폴백
+			DownCount = 1;
+			bIsGroggy = true;
+
+			if (CarryingComponent && CarryingComponent->IsCarrying())
+			{
+				CarryingComponent->GrabOrDrop();
+			}
+			
+			OnSprintEnd();
+			MulticastOnEnterGroggy();
+		}
 	}
 	else if (DownCount >= 1)
 	{
-		// 두 번째 다운 (최종 사망)
-		DownCount = 2;
-		bIsDead = true;
-
-		// 사망 시 인벤토리 슬롯의 모든 아이템을 사방으로 흩뿌림 (InventoryComponent)
-		// 완전히 죽었을 때(bIsDead == true)만 이 블록이 실행되므로 안전합니다.
-		if (InventoryComponent)
+		if (AbilitySystemComponent && DeathAbilitySpecHandle.IsValid())
 		{
-			for (int32 i = 0; i < InventoryComponent->InventorySlots.Num(); ++i)
-			{
-				if (AItemBase* Item = InventoryComponent->InventorySlots[i])
-				{
-					// 수납 해제 후 렌더링 재활성화
-					Item->MulticastOnEquipped(nullptr);
-					
-					// 랜덤한 포물선 방향(X, Y)과 위쪽으로 튕기는 힘(Z)을 계산합니다.
-					FVector ScatterImpulse = FVector(
-						FMath::RandRange(-400.f, 400.f), 
-						FMath::RandRange(-400.f, 400.f), 
-						FMath::RandRange(400.f, 700.f)
-					);
-					
-					// Throw 함수를 사용해 아이템에 물리적인 힘을 가해 흩뿌립니다.
-					Item->Throw(ScatterImpulse, this);
+			AbilitySystemComponent->TryActivateAbility(DeathAbilitySpecHandle);
+		}
+		else
+		{
+			// 두 번째 다운 (최종 사망) 폴백
+			DownCount = 2;
+			bIsDead = true;
 
-					InventoryComponent->InventorySlots[i] = nullptr;
-					InventoryComponent->OnInventorySlotChanged.Broadcast(i, nullptr);
+			if (InventoryComponent)
+			{
+				for (int32 i = 0; i < InventoryComponent->InventorySlots.Num(); ++i)
+				{
+					if (AItemBase* Item = InventoryComponent->InventorySlots[i])
+					{
+						Item->MulticastOnEquipped(nullptr);
+						FVector ScatterImpulse = FVector(
+							FMath::RandRange(-400.f, 400.f), 
+							FMath::RandRange(-400.f, 400.f), 
+							FMath::RandRange(400.f, 700.f)
+						);
+						Item->Throw(ScatterImpulse, this);
+						InventoryComponent->InventorySlots[i] = nullptr;
+						InventoryComponent->OnInventorySlotChanged.Broadcast(i, nullptr);
+					}
 				}
 			}
+			MulticastOnDeath();
 		}
-		
-		// 모든 클라이언트에 블루프린트 이벤트 방송
-		MulticastOnDeath();
 	}
 }
 
@@ -931,6 +1281,11 @@ void AMainCharacter::ReviveCharacter(float RestoredHealth)
 	if (!bIsGroggy || bIsDead)
 	{
 		return;
+	}
+
+	if (AbilitySystemComponent && GroggyAbilitySpecHandle.IsValid())
+	{
+		AbilitySystemComponent->CancelAbilityHandle(GroggyAbilitySpecHandle);
 	}
 
 	bIsGroggy = false;
@@ -1063,8 +1418,31 @@ void AMainCharacter::StartPushMode(AActor* TargetObject)
 		CarryingComponent->GrabOrDrop();
 	}
 
+	// 달리기 중이었다면 달리기 즉시 강제 취소
+	if (bIsSprinting)
+	{
+		bIsSprinting = false;
+		if (!HasAuthority())
+		{
+			ServerSetSprinting(false);
+		}
+	}
+
 	bIsPushingMode = true;
 	CurrentPushedObject = TargetObject;
+
+	if (AbilitySystemComponent)
+	{
+		if (PushAbilitySpecHandle.IsValid())
+		{
+			AbilitySystemComponent->TryActivateAbility(PushAbilitySpecHandle);
+		}
+		else
+		{
+			static const FGameplayTagContainer PushTagContainer(FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing")));
+			AbilitySystemComponent->TryActivateAbilitiesByTag(PushTagContainer);
+		}
+	}
 
 	if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
 	{
@@ -1077,45 +1455,29 @@ void AMainCharacter::StartPushMode(AActor* TargetObject)
 	Dir.Z = 0.0f;
 	Dir.Normalize();
 	SetActorRotation(Dir.Rotation());
-	LockedPushDirection = Dir; // 밀기 방향 고정
+	LockedPushDirection = Dir;
 
-	// 이동 시 캐릭터가 회전하는 것을 방지 (항상 박스를 바라보도록 유지)
 	if (GetCharacterMovement())
 	{
 		bOriginalOrientRotation = GetCharacterMovement()->bOrientRotationToMovement;
 		GetCharacterMovement()->bOrientRotationToMovement = false;
 	}
 
-	// 현재 캐릭터의 위치를 기준점으로 설정 (이동량 계산용)
 	LastCharacterLocation = GetActorLocation();
 
-	// 2. 물리 끄기 및 충돌 완벽 무시 (캐릭터가 상자를 밀 때 서로 겹쳐서 이동이 막히는 것을 방지)
 	if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(TargetObject->GetRootComponent()))
 	{
-		// 물리 충돌로 인해 캐릭터가 밀려나는(미끄러지는) 현상을 원천 차단하기 위해 충돌 반응 자체를 Ignore로 변경
 		PrimComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 		PrimComp->IgnoreActorWhenMoving(this, true);
 		GetCapsuleComponent()->IgnoreActorWhenMoving(TargetObject, true);
-		
-		// 혹시 모를 캐릭터 메쉬와의 충돌도 예외 처리
 		GetMesh()->IgnoreActorWhenMoving(TargetObject, true);
 	}
 
-	// 3. 상태 태그 부여 (애니메이션 연동)
 	if (StatusComponent)
 	{
-		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Pushing"), false);
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
 		StatusComponent->AddStatusTag(PushingTag);
 	}
-
-	// 4. 밀기 모드 이동 속도 저하
-	if (GetCharacterMovement())
-	{
-		OriginalWalkSpeed = GetCharacterMovement()->MaxWalkSpeed;
-		GetCharacterMovement()->MaxWalkSpeed = PushSpeed;
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("밀기 모드 진입"));
 }
 
 void AMainCharacter::ServerStartPushMode_Implementation(AActor* TargetObject)
@@ -1130,15 +1492,26 @@ void AMainCharacter::StopPushMode()
 		ServerStopPushMode();
 	}
 
-	// 표정 복구
 	if (HasAuthority())
 	{
 		ChangeEmotion(EmotionIndex_Normal);
 	}
 
 	bIsPushingMode = false;
+
+	if (AbilitySystemComponent)
+	{
+		if (PushAbilitySpecHandle.IsValid())
+		{
+			AbilitySystemComponent->CancelAbilityHandle(PushAbilitySpecHandle);
+		}
+		else
+		{
+			static const FGameplayTagContainer PushTagContainer(FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing")));
+			AbilitySystemComponent->CancelAbilities(&PushTagContainer);
+		}
+	}
 	
-	// 물리 및 충돌 무시 원상 복구
 	if (CurrentPushedObject)
 	{
 		if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
@@ -1155,28 +1528,34 @@ void AMainCharacter::StopPushMode()
 		}
 	}
 
+	CurrentPushInput = 0.0f;
+	if (!HasAuthority())
+	{
+		ServerSetPushInput(0.0f);
+	}
+
 	CurrentPushedObject = nullptr;
 
-	// 2. 상태 태그 제거
 	if (StatusComponent)
 	{
-		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Pushing"), false);
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
 		StatusComponent->RemoveStatusTag(PushingTag);
 	}
 
-	// 3. 이동 속도 및 회전 옵션 원상 복구
 	if (GetCharacterMovement())
 	{
-		GetCharacterMovement()->MaxWalkSpeed = OriginalWalkSpeed;
 		GetCharacterMovement()->bOrientRotationToMovement = bOriginalOrientRotation;
 	}
-
-	UE_LOG(LogTemp, Log, TEXT("밀기 모드 해제"));
 }
 
 void AMainCharacter::ServerStopPushMode_Implementation()
 {
 	StopPushMode();
+}
+
+void AMainCharacter::ServerSetPushInput_Implementation(float NewInput)
+{
+	CurrentPushInput = NewInput;
 }
 
 void AMainCharacter::OnRep_IsPushingMode()
@@ -1185,10 +1564,129 @@ void AMainCharacter::OnRep_IsPushingMode()
 	// bIsPushingMode 값 자체는 이미 서버와 동기화되었으므로 애니메이션은 정상 작동합니다.
 }
 
-void AMainCharacter::SetReviveUIVisibility(bool bIsVisible)
+float AMainCharacter::GetRequiredReviveTime() const
 {
-	if (ReviveWidgetComponent)
+	if (ReviveAbilityClass)
 	{
-		ReviveWidgetComponent->SetVisibility(bIsVisible);
+		if (const UGA_Revive* ReviveCDO = ReviveAbilityClass->GetDefaultObject<UGA_Revive>())
+		{
+			return ReviveCDO->ReviveDuration;
+		}
+	}
+	return RequiredReviveTime;
+}
+
+float AMainCharacter::GetReviveProgress() const
+{
+	const float Duration = GetRequiredReviveTime();
+	if (Duration <= 0.0f)
+	{
+		return 1.0f;
+	}
+	return FMath::Clamp(CurrentReviveHoldTime / Duration, 0.0f, 1.0f);
+}
+
+void AMainCharacter::StartReviveHold(AMainCharacter* Target)
+{
+	if (!Target || !Target->bIsGroggy || Target->bIsDead || Target == this)
+	{
+		return;
+	}
+
+	bIsHoldingRevive = true;
+	CurrentReviveHoldTime = 0.0f;
+	CurrentReviveTarget = Target;
+
+	// 살리는 동안 이동 즉시 정지 (이동 차단)
+	if (GetCharacterMovement())
+	{
+		GetCharacterMovement()->StopMovementImmediately();
+	}
+
+	// GAS 어빌리티 활성화
+	if (AbilitySystemComponent && ReviveAbilitySpecHandle.IsValid())
+	{
+		AbilitySystemComponent->TryActivateAbility(ReviveAbilitySpecHandle);
+	}
+
+	OnReviveHoldStarted(Target);
+	Target->SetReviveProgress(0.0f);
+}
+
+void AMainCharacter::CancelReviveHold()
+{
+	if (!bIsHoldingRevive)
+	{
+		return;
+	}
+
+	bIsHoldingRevive = false;
+	CurrentReviveHoldTime = 0.0f;
+
+	if (AbilitySystemComponent && ReviveAbilitySpecHandle.IsValid())
+	{
+		AbilitySystemComponent->CancelAbilityHandle(ReviveAbilitySpecHandle);
+	}
+
+	if (CurrentReviveTarget.IsValid())
+	{
+		CurrentReviveTarget->SetReviveProgress(0.0f);
+	}
+	CurrentReviveTarget = nullptr;
+
+	OnReviveHoldEnded(false);
+}
+
+void AMainCharacter::CompleteReviveHold()
+{
+	if (!bIsHoldingRevive)
+	{
+		return;
+	}
+
+	AMainCharacter* Target = CurrentReviveTarget.Get();
+
+	bIsHoldingRevive = false;
+	CurrentReviveHoldTime = 0.0f;
+	CurrentReviveTarget = nullptr;
+
+	if (AbilitySystemComponent && ReviveAbilitySpecHandle.IsValid())
+	{
+		AbilitySystemComponent->CancelAbilityHandle(ReviveAbilitySpecHandle);
+	}
+
+	OnReviveHoldEnded(true);
+
+	if (Target && Target->bIsGroggy && !Target->bIsDead)
+	{
+		Target->SetReviveProgress(0.0f);
+		ServerReviveTarget(Target);
 	}
 }
+
+void AMainCharacter::SetReviveProgress(float Progress)
+{
+	OnReviveProgressUpdated(Progress);
+}
+
+void AMainCharacter::HandleHealthChanged(const FOnAttributeChangeData& Data)
+{
+	Super::HandleHealthChanged(Data);
+
+	// 체력 감소(피격 시) 부활 차징 취소
+	if (Data.NewValue < Data.OldValue && bIsHoldingRevive)
+	{
+		CancelReviveHold();
+	}
+}
+
+float AMainCharacter::TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, class AController* EventInstigator, AActor* DamageCauser)
+{
+	float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+	if (ActualDamage > 0.0f && bIsHoldingRevive)
+	{
+		CancelReviveHold();
+	}
+	return ActualDamage;
+}
+

@@ -79,4 +79,5 @@ protected:
 	// [Heavy 전용] 내가 두 번째 운반자인지 여부 (= IK로 뒤쪽 잘는 사람)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|State")
 	bool bIsSecondCarrier = false;
+
 };

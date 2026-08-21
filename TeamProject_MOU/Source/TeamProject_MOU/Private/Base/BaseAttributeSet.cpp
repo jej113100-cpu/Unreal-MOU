@@ -12,10 +12,8 @@ UBaseAttributeSet::UBaseAttributeSet()
 	MaxHealth = 100.0f;
 	Stemina = 100.0f;
 	MaxStemina = 100.0f;
-	MoveSpeed = 600.0f;
+	MoveSpeed = 300.0f;
 	MaxMoveSpeed = 2000.0f;
-	LiftPower = 50.0f;
-	MaxLiftPower = 100.0f;
 	CurrentWeight = 0.0f;
 	MaxWeight = 100.0f;
 }
@@ -55,16 +53,6 @@ void UBaseAttributeSet::OnRep_MaxStemina(const FGameplayAttributeData& OldValue)
 	GAMEPLAYATTRIBUTE_REPNOTIFY(UBaseAttributeSet, MaxStemina, OldValue);
 }
 
-void UBaseAttributeSet::OnRep_LiftPower(const FGameplayAttributeData& OldValue) const
-{
-	GAMEPLAYATTRIBUTE_REPNOTIFY(UBaseAttributeSet, LiftPower, OldValue);
-}
-
-void UBaseAttributeSet::OnRep_MaxLiftPower(const FGameplayAttributeData& OldValue) const
-{
-	GAMEPLAYATTRIBUTE_REPNOTIFY(UBaseAttributeSet, MaxLiftPower, OldValue);
-}
-
 void UBaseAttributeSet::OnRep_CurrentWeight(const FGameplayAttributeData& OldValue) const
 {
 	GAMEPLAYATTRIBUTE_REPNOTIFY(UBaseAttributeSet, CurrentWeight, OldValue);
@@ -85,8 +73,6 @@ void UBaseAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, MaxMoveSpeed, COND_None, REPNOTIFY_Always);
 	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, Stemina, COND_None, REPNOTIFY_Always);
 	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, MaxStemina, COND_None, REPNOTIFY_Always);
-	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, LiftPower, COND_None, REPNOTIFY_Always);
-	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, MaxLiftPower, COND_None, REPNOTIFY_Always);
 	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, CurrentWeight, COND_None, REPNOTIFY_Always);
 	DOREPLIFETIME_CONDITION_NOTIFY(UBaseAttributeSet, MaxWeight, COND_None, REPNOTIFY_Always);
 }
@@ -106,10 +92,6 @@ void UBaseAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribute, 
 	else if(Attribute == GetSteminaAttribute())
 	{
 		NewValue = FMath::Clamp(NewValue, 0.0f, GetMaxStemina());
-	}
-	else if(Attribute == GetLiftPowerAttribute())
-	{
-		NewValue = FMath::Clamp(NewValue, 0.0f, GetMaxLiftPower());
 	}
 	else if(Attribute == GetCurrentWeightAttribute())
 	{
@@ -140,10 +122,6 @@ void UBaseAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCallba
 	else if(Data.EvaluatedData.Attribute == GetSteminaAttribute())
 	{
 		SetStemina(FMath::Clamp(GetStemina(), 0.0f, GetMaxStemina()));
-	}
-	else if(Data.EvaluatedData.Attribute == GetLiftPowerAttribute())
-	{
-		SetLiftPower(FMath::Clamp(GetLiftPower(), 0.0f, GetMaxLiftPower()));
 	}
 	else if(Data.EvaluatedData.Attribute == GetCurrentWeightAttribute())
 	{

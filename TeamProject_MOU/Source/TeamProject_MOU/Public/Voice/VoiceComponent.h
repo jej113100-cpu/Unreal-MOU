@@ -92,6 +92,58 @@ public:
 	UFUNCTION(Client, Unreliable)
 	void ClientReceiveVoiceFrame(const FVoiceFrameOut& Frame);
 
+	// --- 사망 상태 (V5) ------------------------------------------------------
+
+	/**
+	 * 이 플레이어가 음성으로 아무것도 할 수 없는 상태인가.
+	 *
+	 * 말하기·듣기 **양쪽 다** 막힌다(8절 표). 죽은 사람이 대화를 엿듣는 것도
+	 * 막아야 하기 때문이다.
+	 *
+	 * ★ 지금은 `MOU.Voice.Die` / `MOU.Voice.Revive` 로만 바뀌는 **임시 상태**다.
+	 *   나중에 실제 게임 상태(`AMainCharacter::bIsDead`)와 엮을 때는
+	 *   이 함수 안에서 그 값을 같이 보게 하면 된다 - **이 함수를 부르는 쪽은
+	 *   하나도 안 고쳐도 되도록** 판정을 여기 한 곳에 모아두었다.
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	bool IsVoiceDead() const { return bVoiceDead; }
+
+	/**
+	 * 사망 상태를 바꾼다. **서버에서만 호출한다.**
+	 * 클라에서 바꾸고 싶으면 ServerSetVoiceDead 를 쓴다.
+	 */
+	void SetVoiceDeadAuthoritative(bool bDead);
+
+	/**
+	 * 클라가 서버에 사망 상태 변경을 요청한다(지금은 콘솔 명령 전용).
+	 *
+	 * ★ Reliable 인 이유: 음성 프레임과 달리 **놓치면 상태가 영구히 어긋난다.**
+	 *   "죽었는데 서버는 살아있다고 아는" 상태가 되면 계속 말이 나간다.
+	 *
+	 * ★ 이 RPC 는 나중에 없어질 것이다. 진짜 사망은 게임 로직이 서버에서
+	 *   판정하는 것이지 클라가 요청할 일이 아니다 - 지금은 테스트 수단이다.
+	 */
+	UFUNCTION(Server, Reliable)
+	void ServerSetVoiceDead(bool bDead);
+
+	// --- 무전기 테스트용 (V6) ------------------------------------------------
+	//
+	// ★ 아래 세 RPC 는 **임시다.** 진짜 무전기는 아이템으로 줍고 버리는 것이고,
+	//   전원은 `Z` 키가, 송신은 `X` 키가 담당한다. 아이템 파트가 끝나면
+	//   AVoiceDebugRadio 와 함께 지운다.
+
+	/** 내 폰에 테스트 무전기를 하나 만든다(서버). */
+	UFUNCTION(Server, Reliable)
+	void ServerDebugSpawnRadio();
+
+	/** 들고 있던 테스트 무전기를 그 자리에 놓는다(서버). */
+	UFUNCTION(Server, Reliable)
+	void ServerDebugDropRadio();
+
+	/** 내 무전기 전원을 바꾼다. 설계상 `Z` 키에 대응한다(서버). */
+	UFUNCTION(Server, Reliable)
+	void ServerDebugSetRadioPower(bool bOn);
+
 	// --- 진단 ---------------------------------------------------------------
 
 	int32 GetFramesSent()     const { return FramesSent; }
@@ -101,7 +153,27 @@ public:
 	/** 이 컴포넌트의 소유 PlayerController. 아니면 null. */
 	APlayerController* GetOwningPlayerController() const;
 
+	/**
+	 * 주어진 컨트롤러가 음성 사망 상태인지. 음성 컴포넌트가 없으면 false(살아있음).
+	 *
+	 * 라우터가 발신자·수신자 양쪽을 검사할 때 쓰는 공통 판정이다.
+	 * **사망 판정을 아는 곳을 한 군데로 모으기 위해** 정적 함수로 뺐다.
+	 */
+	static bool IsPlayerVoiceDead(APlayerController* PC);
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 private:
+	/**
+	 * 서버가 정하고 클라에 복제되는 사망 상태.
+	 *
+	 * ★ 복제하는 이유: 클라도 이 값을 알아야 **캡처를 멈추고 UI 를 바꾼다**(1겹).
+	 *   서버만 알면 죽은 사람이 계속 말하다가 아무도 못 듣는 것을 모른 채
+	 *   답답해한다. 방어의 본체는 서버(2·3겹)이고 이건 알려주기 위한 것이다.
+	 */
+	UPROPERTY(Replicated)
+	bool bVoiceDead = false;
+
 	/**
 	 * 다음에 보낼 프레임 번호.
 	 *

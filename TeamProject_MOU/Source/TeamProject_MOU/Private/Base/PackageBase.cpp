@@ -6,7 +6,9 @@
 #include "Components/CapsuleComponent.h"
 #include "Player/MainCharacter.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Ability/GA_CoopCarry.h"
 
 APackageBase::APackageBase()
 {
@@ -388,18 +390,15 @@ void APackageBase::UpdateCarriersSpeedModifier()
 		return;
 	}
 
-	float TotalLiftPower = 0.0f;
 	float WeightPerCarrier = CurrentCarriers.Num() > 0 ? (ItemWeight / CurrentCarriers.Num()) : 0.0f;
 
-	// 참여한 모든 플레이어의 LiftPower 합산 및 무게 재분배
+	// 참여한 모든 플레이어에게 무게 균등 분배
 	for (AActor* Carrier : CurrentCarriers)
 	{
 		if (ACharacterBase* BaseChar = Cast<ACharacterBase>(Carrier))
 		{
 			if (UBaseAttributeSet* AttrSet = BaseChar->BaseAttribute)
 			{
-				TotalLiftPower += AttrSet->GetLiftPower();
-				
 				// 기존에 분배된 무게가 있다면 일단 차감 (재분배를 위함)
 				if (AppliedWeightMap.Contains(Carrier))
 				{
@@ -413,19 +412,7 @@ void APackageBase::UpdateCarriersSpeedModifier()
 		}
 	}
 
-	if (CurrentCarriers.Num() > 0)
-	{
-		// (총 드는 힘 / 택배 무게) 비율 계산 (최대 1.0 = 정상 속도)
-		CurrentSpeedRatio = FMath::Clamp(TotalLiftPower / ItemWeight, 0.1f, 1.0f);
-
-		// TODO: 계산된 SpeedRatio를 각 Carrier에게 GameplayEffect(Modifier)로 적용하여 속도 저하
-		UE_LOG(LogTemp, Log, TEXT("택배 운반 인원: %d명, 총 힘: %f, 인당 분배 무게: %f -> 속도 배율: %f"), 
-			CurrentCarriers.Num(), TotalLiftPower, WeightPerCarrier, CurrentSpeedRatio);
-	}
-	else
-	{
-		CurrentSpeedRatio = 1.0f;
-	}
+	CurrentSpeedRatio = 1.0f;
 }
 
 void APackageBase::OnPackageHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)

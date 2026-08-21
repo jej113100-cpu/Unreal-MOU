@@ -71,6 +71,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MOU|Voice")
 	float RefreshInterval = 0.1f;
 
+	/**
+	 * 입력 음량 게이지를 같이 보여줄지.
+	 *
+	 * ★ 켜 두는 것이 기본이다. 9절: "감도 슬라이더 옆에 실시간 입력 게이지를
+	 *   반드시 같이 둔다 - 숫자만 있으면 아무도 못 맞춘다."
+	 *   마이크 환경이 팀원마다 달라서, 이게 없으면 **감도가 안 맞을 때 원인을
+	 *   짐작할 방법이 전혀 없다**(가만히 있는데 계속 말하는 중으로 나오는 등).
+	 *
+	 *   최종 빌드에서 화면을 깔끔하게 하고 싶으면 끄면 된다. 그 대신
+	 *   V9 옵션 화면에는 같은 게이지가 반드시 있어야 한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MOU|Voice")
+	bool bShowLevelGauge = true;
+
 protected:
 	/** WBP 에 같은 이름의 TextBlock 이 있으면 자동으로 연결된다. 없으면 BuildDefaultLayout 이 만든다. */
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "MOU|Voice")

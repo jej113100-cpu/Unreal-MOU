@@ -102,10 +102,10 @@ public:
 	 * 이미 연결 중이면 아무 것도 하지 않는다.
 	 *
 	 * [주소를 인자로 넘기지 않는 것이 기본이다]
-	 *   InHost 를 비워두거나 InPort 를 0 으로 두면 UMOUChatServerSettings::ResolveEndpoint
+	 *   InHost 를 비워두거나 InPort 를 0 으로 두면 UMOUServerSettings::ResolveEndpoint
 	 *   가 대신 정한다 — 즉 Config/DefaultGame.ini 의 팀 공유 주소를 쓴다.
 	 *   여기에 127.0.0.1 을 직접 넘기면 사람마다 "자기 PC" 를 가리키게 되어, 서버를 켜지
-	 *   않은 팀원은 무조건 접속에 실패한다. (Chat/ChatServerSettings.h 의 주석 참고)
+	 *   않은 팀원은 무조건 접속에 실패한다. (Chat/ServerSettings.h 의 주석 참고)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "MOU|Chat")
 	void ConnectToChatServer(const FString& InHost = TEXT(""), int32 InPort = 0);

@@ -111,8 +111,8 @@ void UInventoryComponent::RequestSlotAction(int32 SlotIndex)
 	// 상태 변경 브로드캐스트 (서버)
 	OnInventorySlotChanged.Broadcast(SlotIndex, InventorySlots[SlotIndex]);
 	
-	// 서버에서 직접 갱신용 호출을 클라이언트에도 알리기 위해 명시적 업데이트 권장
-	// Replicated 변수 갱신으로 클라이언트는 OnRep_InventorySlots 가 호출됨.
+	// 인벤토리 변경에 따른 캐릭터 총 소지 무게 동기화
+	CarryingComp->UpdateCharacterTotalWeight();
 }
 
 void UInventoryComponent::ServerRequestSlotAction_Implementation(int32 SlotIndex)

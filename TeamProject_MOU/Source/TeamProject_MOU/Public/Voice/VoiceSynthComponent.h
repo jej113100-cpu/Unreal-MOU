@@ -102,6 +102,21 @@ public:
 	/** 지금 3D 로 설정돼 있는지. 루프백(2D)과 구분하는 데 쓴다. */
 	bool IsSpatialized() const { return bSpatialConfigured; }
 
+	/**
+	 * 무전기 스피커로 재생하도록 설정한다(V7). **`Start()` 전에 부를 것.**
+	 *
+	 * 근접과 다른 점 두 가지:
+	 *   1. 감쇠 반경이 발화 모드가 아니라 **무전기 속성**에서 온다
+	 *      (무전기 스피커 크기는 말하는 사람이 속삭이든 소리치든 그대로다)
+	 *   2. **무전 톤 필터**가 걸린다 - 대역을 좁히고 찌그러뜨리고 잡음을 얹는다
+	 *
+	 * @param HearRadius  사람이 들을 수 있는 총 거리(cm). URadioComponent 의 값.
+	 */
+	void SetRadioMode(float HearRadius);
+
+	/** 지금 무전 톤이 걸려 있는지. */
+	bool IsRadioFiltered() const { return bRadioFilterEnabled; }
+
 protected:
 	// --- USynthComponent ---------------------------------------------------
 
@@ -154,4 +169,37 @@ private:
 
 	/** SetProximityMode 가 한 번이라도 불렸는지. 2D(루프백)와 구분한다. */
 	bool bSpatialConfigured = false;
+
+	// -----------------------------------------------------------------------
+	// 무전 톤 필터 (V7)
+	//
+	// ★★ 아래 상태 변수는 **오디오 렌더 스레드 전용**이다.
+	//    OnGenerateAudio 안에서만 읽고 쓴다. 게임 스레드에서 만지면 지직거린다.
+	//
+	// [왜 소스 이펙트 체인 에셋이 아니라 코드인가]
+	//   설계 문서 7-4절은 USoundEffectSourcePresetChain 에셋을 쓰라고 했다.
+	//   디자이너가 에디터에서 톤을 굴릴 수 있어야 한다는 이유인데, 맞는 말이다.
+	//   다만 **지금 그 에셋이 없다.** 에셋을 만들 때까지 무전이 그냥 맑은
+	//   목소리로 들리면 "무전기 같은가" 를 판단할 수가 없다.
+	//
+	//   그래서 코드로 기본 톤을 넣어 지금 들어볼 수 있게 하고, 나중에 에셋이
+	//   생기면 SourceEffectChain 프로퍼티(USynthComponent 가 이미 갖고 있다)에
+	//   지정하고 이 내장 필터를 끄면 된다. 둘은 배타적이지 않다.
+	// -----------------------------------------------------------------------
+
+	/** 무전 톤을 적용할지. 게임 스레드가 켜고 렌더 스레드가 읽는다(bool 이라 원자적). */
+	bool bRadioFilterEnabled = false;
+
+	/** 하이패스 상태 - 저음을 깎아 "전화기" 대역으로 만든다. */
+	float HighPassState = 0.f;
+
+	/** 로우패스 상태 - 고음을 깎는다. 두 개를 겹쳐 기울기를 키운다. */
+	float LowPassState1 = 0.f;
+	float LowPassState2 = 0.f;
+
+	/** 잡음 생성용 난수 상태. FMath::Rand 를 렌더 스레드에서 쓰면 안 되므로 직접 돌린다. */
+	uint32 NoiseSeed = 0x1234567u;
+
+	/** 무전 톤을 입힌다. **오디오 렌더 스레드에서만 호출한다.** */
+	void ApplyRadioFilter(float* Audio, int32 NumSamples);
 };

@@ -29,7 +29,7 @@ public class TeamProject_MOU : ModuleRules
             "Sockets",
             "Networking",
 
-            // 채팅 서버 주소를 Project Settings 에 노출한다 (Chat/ChatServerSettings.h).
+            // 채팅 서버 주소를 Project Settings 에 노출한다 (Chat/ServerSettings.h).
             "DeveloperSettings",
 
             // --- 음성 시스템 (VOICE_INTEGRATION.md 4절) ------------------

@@ -5,11 +5,15 @@
 
 #include "Voice/VoiceComponent.h"
 
+#include "Voice/RadioComponent.h"
+#include "Voice/VoiceDebugRadio.h"
 #include "Voice/VoicePlaybackComponent.h"
 #include "Voice/VoiceRouter.h"
 
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "Net/UnrealNetwork.h"
 
 namespace
 {
@@ -45,6 +49,110 @@ UVoiceComponent* UVoiceComponent::Find(APlayerController* PC)
 APlayerController* UVoiceComponent::GetOwningPlayerController() const
 {
 	return Cast<APlayerController>(GetOwner());
+}
+
+void UVoiceComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// 소유자에게만 보내도 될 것 같지만 **모두에게 보낸다.**
+	// 나중에 "누가 죽었는지" 를 남의 화면(관전 UI, 팀 표시)에서도 알아야 하고,
+	// bool 하나라 대역폭이 문제되지 않는다.
+	DOREPLIFETIME(UVoiceComponent, bVoiceDead);
+}
+
+// ---------------------------------------------------------------------------
+// 사망 상태 (V5)
+// ---------------------------------------------------------------------------
+
+bool UVoiceComponent::IsPlayerVoiceDead(APlayerController* PC)
+{
+	const UVoiceComponent* Voice = Find(PC);
+
+	// 음성 컴포넌트가 없으면 사망 여부를 알 수 없다. **살아있는 것으로 본다.**
+	//
+	// 반대로(없으면 죽은 것으로) 잡으면, 컴포넌트가 없는 순간 - 접속 직후나
+	// 다른 PlayerController 클래스를 쓰는 경우 - 그 사람의 음성이 통째로
+	// 조용히 사라진다. 원인을 찾기 매우 어려운 종류다.
+	return Voice ? Voice->IsVoiceDead() : false;
+}
+
+void UVoiceComponent::SetVoiceDeadAuthoritative(bool bDead)
+{
+	// 서버 전용이다. 클라에서 바꿔봐야 다음 복제 때 덮어써지고,
+	// 그 사이에 "나만 죽은 줄 아는" 어긋난 상태가 생긴다.
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		UE_LOG(LogMOUVoice, Warning,
+			TEXT("SetVoiceDeadAuthoritative 는 서버에서만 부를 수 있다. ")
+			TEXT("클라에서는 ServerSetVoiceDead 를 쓸 것."));
+		return;
+	}
+
+	if (bVoiceDead == bDead)
+	{
+		return;
+	}
+
+	bVoiceDead = bDead;
+
+	UE_LOG(LogMOUVoice, Log, TEXT("[서버] 플레이어 음성 상태 = %s"),
+		bDead ? TEXT("사망(말하기·듣기 모두 차단)") : TEXT("생존"));
+}
+
+void UVoiceComponent::ServerSetVoiceDead_Implementation(bool bDead)
+{
+	SetVoiceDeadAuthoritative(bDead);
+}
+
+// ---------------------------------------------------------------------------
+// 무전기 테스트용 (V6) - 아이템 파트가 끝나면 지운다
+// ---------------------------------------------------------------------------
+
+void UVoiceComponent::ServerDebugSpawnRadio_Implementation()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+
+	if (!Pawn)
+	{
+		UE_LOG(LogMOUVoice, Warning, TEXT("폰이 없어 테스트 무전기를 만들 수 없다."));
+		return;
+	}
+
+	AVoiceDebugRadio::SpawnAttachedTo(Pawn);
+}
+
+void UVoiceComponent::ServerDebugDropRadio_Implementation()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+
+	if (AVoiceDebugRadio* Radio = AVoiceDebugRadio::FindHeldBy(Pawn))
+	{
+		Radio->DropHere();
+	}
+	else
+	{
+		UE_LOG(LogMOUVoice, Warning, TEXT("들고 있는 테스트 무전기가 없다."));
+	}
+}
+
+void UVoiceComponent::ServerDebugSetRadioPower_Implementation(bool bOn)
+{
+	APlayerController* PC = GetOwningPlayerController();
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+
+	AVoiceDebugRadio* Radio = AVoiceDebugRadio::FindHeldBy(Pawn);
+
+	if (!Radio || !Radio->RadioComponent)
+	{
+		UE_LOG(LogMOUVoice, Warning,
+			TEXT("무전기가 없다. MOU.Voice.Radio.Spawn 으로 먼저 만들 것."));
+		return;
+	}
+
+	Radio->RadioComponent->SetPowered(bOn);
 }
 
 // ---------------------------------------------------------------------------

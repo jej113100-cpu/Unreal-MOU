@@ -119,8 +119,8 @@ void ATeamProject_MOUPlayerController::ShowLoginWidgetIfNeeded()
 
 	// 비워두면 위젯이 설정(Config/DefaultGame.ini)에서 읽는다. 컨트롤러가 굳이
 	// 기본 주소를 알 필요는 없으므로, 예외적으로 지정했을 때만 덮어쓴다.
-	LoginWidget->ServerHost = ChatServerHostOverride;
-	LoginWidget->ServerPort = ChatServerPortOverride;
+	LoginWidget->ServerHost = ServerHostOverride;
+	LoginWidget->ServerPort = ServerPortOverride;
 	LoginWidget->AddToViewport();
 
 	// 로그인 화면은 마우스로 조작하므로 커서를 켜준다. NativeConstruct 가 입력 모드까지

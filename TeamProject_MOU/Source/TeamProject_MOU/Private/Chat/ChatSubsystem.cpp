@@ -12,7 +12,7 @@
 
 #include "Chat/ChatClientRunnable.h"
 #include "Chat/ChatFraming.h"
-#include "Chat/ChatServerSettings.h"
+#include "Chat/ServerSettings.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -138,7 +138,7 @@ void UChatSubsystem::ConnectToChatServer(const FString& InHost, int32 InPort)
 		FString ResolvedHost;
 		int32   ResolvedPort = 0;
 		FString Source;
-		UMOUChatServerSettings::ResolveEndpoint(ResolvedHost, ResolvedPort, &Source);
+		UMOUServerSettings::ResolveEndpoint(ResolvedHost, ResolvedPort, &Source);
 
 		if (Host.IsEmpty()) { Host = ResolvedHost; }
 		if (Port <= 0)      { Port = ResolvedPort; }
@@ -840,13 +840,13 @@ namespace
 	 * 지금 어느 서버를 보고 있는지 확인한다. "왜 나만 접속이 안 되지?" 를
 	 * 제일 빨리 가르는 명령이라 따로 뒀다.
 	 */
-	FAutoConsoleCommand GChatServerCommand(
+	FAutoConsoleCommand GServerCommand(
 		TEXT("MOU.Chat.Server"),
 		TEXT("현재 설정된 채팅 서버 주소와 그 출처를 출력한다."),
 		FConsoleCommandDelegate::CreateLambda(
 			[]()
 			{
-				UE_LOG(LogMOUChat, Log, TEXT("채팅 서버: %s"), *UMOUChatServerSettings::GetResolvedEndpointText());
+				UE_LOG(LogMOUChat, Log, TEXT("채팅 서버: %s"), *UMOUServerSettings::GetResolvedEndpointText());
 			}));
 
 	/**
@@ -861,12 +861,12 @@ namespace
 			{
 				if (Args.Num() == 0)
 				{
-					UMOUChatServerSettings::ClearEndpointOverrideForThisMachine();
+					UMOUServerSettings::ClearEndpointOverrideForThisMachine();
 				}
 				else
 				{
 					const int32 PortArg = Args.IsValidIndex(1) ? FCString::Atoi(*Args[1]) : 0;
-					UMOUChatServerSettings::SaveEndpointOverrideForThisMachine(Args[0], PortArg);
+					UMOUServerSettings::SaveEndpointOverrideForThisMachine(Args[0], PortArg);
 				}
 
 				// 이미 붙어 있던 연결은 옛 주소를 향하고 있으므로 끊고 새로 붙어야 한다.

@@ -176,6 +176,40 @@ namespace MOUVoice
 	 */
 	inline constexpr float VadHangoverSeconds = 0.2f;
 
+	// -----------------------------------------------------------------------
+	// 감도 자동 보정 (MOU.Voice.Calibrate)
+	//
+	// ★ 왜 필요한가: DefaultVadThreshold(0.02)는 **어떤 마이크에도 맞지 않는
+	//   임의의 숫자다.** USB 헤드셋은 조용할 때 RMS 가 0.001 근처지만, 메인보드
+	//   3.5mm 아날로그 입력은 전기 잡음과 마이크 부스트 때문에 0.03~0.08 이
+	//   그냥 나온다. 그러면 **가만히 있어도 계속 "말하는 중"** 이 된다.
+	//
+	//   사람이 이 숫자를 감으로 맞추는 것은 불가능하다(9절). 그래서 조용한
+	//   상태를 잠깐 측정해 그 위로 기준을 올리는 방식으로 자동화한다.
+	// -----------------------------------------------------------------------
+
+	/** 보정 측정 시간(초). 너무 짧으면 순간적인 잡음을 놓친다. */
+	inline constexpr float DefaultCalibrationSeconds = 2.0f;
+
+	/**
+	 * 측정된 소음 최대치에 곱해 기준을 정한다.
+	 *
+	 * 1.0 이면 잡음 봉우리에 딱 붙어서 조금만 시끄러워도 오작동한다.
+	 * 너무 크면 작게 말할 때 안 잡힌다. 2.0 은 "잡음보다 두 배는 커야 말로 친다".
+	 */
+	inline constexpr float CalibrationMargin = 2.0f;
+
+	/** 보정 결과의 하한. 이보다 낮으면 어떤 잡음에도 반응하게 된다. */
+	inline constexpr float MinVadThreshold = 0.005f;
+
+	/**
+	 * 보정 결과가 이보다 높으면 **하드웨어 설정을 의심해야 한다.**
+	 *
+	 * 잡음 바닥이 이 정도면 기준을 아무리 올려도 작은 목소리를 못 잡는다.
+	 * 소프트웨어로 덮을 문제가 아니라 마이크 부스트를 꺼야 하는 상황이다.
+	 */
+	inline constexpr float NoisyMicWarnThreshold = 0.05f;
+
 	/**
 	 * 재생 링버퍼 용량(프레임 수).
 	 *
@@ -186,10 +220,14 @@ namespace MOUVoice
 	inline constexpr int32 PlaybackBufferFrames = 8;
 
 	/**
-	 * 재생 버퍼가 이만큼 쌓이면 오래된 것부터 버린다.
+	 * 재생 버퍼가 이만큼 쌓이면 오래된 것부터 버린다. **루프백 전용이다.**
 	 *
 	 * 루프백에서 마이크 입력이 재생 소비보다 빠르면 지연이 무한히 누적된다.
 	 * "지금 말한 것이 3초 뒤에 들리는" 상태를 막는 안전장치다.
+	 *
+	 * ★ 네트워크로 받은 소리에는 쓰지 않는다. 거기는 지터버퍼(V4)가 링버퍼를
+	 *   목표 깊이까지만 채우므로 애초에 넘칠 수가 없다 - 넘친 뒤에 버리는 것보다
+	 *   처음부터 안 넣는 편이 낫다.
 	 */
 	inline constexpr int32 PlaybackDropThresholdFrames = 6;
 
@@ -242,7 +280,28 @@ namespace MOUVoice
 		}
 	}
 
-	/** 소음 이벤트의 Loudness 배율. 측정된 RMS 에 곱해서 쓴다. */
+	/**
+	 * 소음 이벤트의 Loudness 배율. 측정된 RMS 에 곱해서 쓴다.
+	 *
+	 * ★★ 주의: 이 값은 "크기" 가 아니라 **반경 배율로도 동작한다.** ★★
+	 *
+	 * `UAISense_Hearing::Update` 는 거리 비교를 이렇게 한다(엔진 소스):
+	 *
+	 *     DistSq > HearingRangeSq * Square(Loudness)          -> 안 들림
+	 *     DistSq > Square(Event.MaxRange * Loudness)          -> 안 들림
+	 *
+	 * 즉 **NPC 가 실제로 듣는 거리 = GetNoiseRange() x GetLoudnessScale()** 이다.
+	 * 위의 GetNoiseRange 표를 그대로 믿으면 안 된다:
+	 *
+	 *     속삭임  700 x 0.35 =  245 cm   (표의 700 이 아니다)
+	 *     보통   1800 x 1.00 = 1800 cm
+	 *     외침   4000 x 1.60 = 6400 cm   (표의 4000 이 아니다)
+	 *
+	 * ★ V8 의 결정: **소음 발행에는 이 값을 쓰지 않는다.**
+	 *   Loudness 는 NoiseEventLoudness(1.0)로 고정하고 거리는 GetNoiseRange 만으로
+	 *   표현한다. 이유는 그 상수의 주석에 적어두었다.
+	 *   이 함수는 이제 MOU.Voice.FakeNoise 의 기본 인자에서만 쓴다.
+	 */
 	inline constexpr float GetLoudnessScale(EVoiceMode Mode)
 	{
 		switch (Mode)
@@ -344,6 +403,68 @@ namespace MOUVoice
 	 */
 	inline constexpr int32 MaxFramesPerSecPerPlayer = 60;
 
+	// -----------------------------------------------------------------------
+	// 지터버퍼 (V4)
+	//
+	// ★ 왜 필요한가: UDP 프레임은 **일정한 간격으로 도착하지 않는다.** 20ms마다
+	//   보내도 받는 쪽에서는 5ms, 40ms, 3ms... 로 흔들리고 순서도 뒤집힌다.
+	//   받는 즉시 재생하면 그 흔들림이 그대로 소리의 끊김이 된다.
+	//
+	//   그래서 **일부러 조금 늦게** 재생한다. 몇 프레임을 모아두고 그 뒤에서
+	//   일정한 속도로 꺼내 쓰면, 늦게 온 프레임도 제시간에 자리를 찾는다.
+	//   지연과 안정성을 맞바꾸는 것이고, 그 교환 비율이 아래 두 숫자다.
+	// -----------------------------------------------------------------------
+
+	/**
+	 * 재생을 시작하기 전에 모아둘 프레임 수. 이 값이 곧 **추가 지연**이다.
+	 *
+	 * 3프레임 = 60ms. 낮추면 반응이 빨라지지만 작은 흔들림에도 끊기고,
+	 * 높이면 안정적이지만 대화가 굼떠진다. 근접 음성은 얼굴을 보며 하는
+	 * 대화라 지연에 민감하므로 낮은 쪽에 둔다.
+	 */
+	inline constexpr int32 TargetJitterFrames = 3;
+
+	/**
+	 * 버퍼가 담을 수 있는 최대 프레임 수(= 재정렬 가능한 범위).
+	 *
+	 * 이보다 앞선 프레임이 오면 재생이 뒤처진 것이므로 따라잡기(재동기화)를 한다.
+	 * 무한정 쌓게 두면 **지연이 계속 누적되어** "몇 초 전 목소리" 를 듣게 된다.
+	 */
+	inline constexpr int32 MaxJitterFrames = 8;
+
+	// -----------------------------------------------------------------------
+	// 유실 은폐 (PLC, Packet Loss Concealment)
+	//
+	// ★★ [V4 에서 확인됨] **엔진 Opus 래퍼로는 진짜 PLC 를 쓸 수 없다.**
+	//
+	//   Opus 자체는 `opus_decode(dec, NULL, 0, ...)` 로 유실 구간을 그럴듯하게
+	//   합성해주는 기능이 있다. 그런데 엔진 래퍼가 그 경로를 막아놨다:
+	//
+	//       // VoiceCodecOpus.cpp, FVoiceDecoderOpus::Decode()
+	//       if (!InCompressedData || (CompressedDataSize < HeaderSize))
+	//       { OutRawDataSize = 0; return; }   // <- null 을 넘기면 그냥 0샘플
+	//
+	//   IVoiceDecoder 인터페이스에 PLC 를 요청할 방법이 아예 없다.
+	//   그래서 **PCM 단계에서 직접 메운다** - 직전 프레임을 감쇠시켜 반복한다.
+	//   Opus 내부 PLC 보다 거칠지만, 아무것도 안 하는 것(무음)보다는 훨씬 낫다.
+	//   짧은 유실에서 "뚝" 끊기는 대신 자연스럽게 잦아든다.
+	// -----------------------------------------------------------------------
+
+	/**
+	 * 연속으로 이만큼까지만 은폐하고 그 뒤로는 무음을 낸다.
+	 *
+	 * 같은 소리를 계속 반복하면 사람 목소리가 아니라 **기계음처럼 웅웅거린다.**
+	 * 3프레임(60ms)이면 짧은 유실을 덮기에 충분하고, 그보다 길게 끊겼다면
+	 * 조용한 편이 덜 거슬린다.
+	 */
+	inline constexpr int32 MaxConcealFrames = 3;
+
+	/**
+	 * 은폐 프레임마다 곱하는 감쇠. 반복할수록 빠르게 잦아들게 한다.
+	 * 1.0 이면 원래 크기로 계속 반복해서 웅웅거림이 그대로 들린다.
+	 */
+	inline constexpr float ConcealFadePerFrame = 0.5f;
+
 	/**
 	 * 이만큼 조용하면 그 발신자의 재생 스트림을 정리한다(초).
 	 *
@@ -376,6 +497,88 @@ namespace MOUVoice
 	{
 		return static_cast<float>(Quantized) / 255.f;
 	}
+
+	// -----------------------------------------------------------------------
+	// 무전 (V6)
+	// -----------------------------------------------------------------------
+
+	/**
+	 * 무전 반이중 - 마지막 프레임 이후 이만큼 지나면 채널 점유가 풀린다(초).
+	 *
+	 * ★ 동시에 한 명만 송신하게 만드는 이유는 "무전기다움" 보다 **대역폭 상한**이다.
+	 *   반이중이 없으면 8명 전원 송신 시 8x7 = 56 스트림이 되어 280 KB/s 로 뛴다(12절).
+	 *   근접에는 적용하지 않는다 - 실제로 여러 명이 동시에 말할 수 있어야 한다.
+	 *
+	 * 0.3초인 이유: 말 사이의 짧은 숨에 채널이 풀려 남에게 뺏기면 안 되고,
+	 * 그렇다고 길면 놓은 뒤에도 한참 잠겨 있다.
+	 */
+	inline constexpr double RadioChannelHoldSeconds = 0.3;
+
+	/** 무전기 스피커 기본 반경(cm). 컴포넌트에서 아이템마다 조절한다. */
+	inline constexpr float DefaultSpeakerHearRadius  = 1000.f;  // 10m - 사람이 듣는 거리
+
+	/**
+	 * ★ NPC 가 듣는 거리는 사람보다 **일부러 넓다**(12m vs 10m).
+	 *   "나한텐 안 들렸는데 NPC 는 들었다" 가 있어야 긴장이 생긴다. 같으면
+	 *   안전 거리를 학습하기가 너무 쉬워진다(7-4절). 이 비율이 난이도의 주 손잡이다.
+	 */
+	inline constexpr float DefaultSpeakerNoiseRadius = 1200.f;  // 12m - NPC 가 듣는 거리
+
+	// -----------------------------------------------------------------------
+	// 소음 이벤트 (V8) — NPC 팀원에게 넘기는 계약 (7-5절)
+	// -----------------------------------------------------------------------
+
+	/**
+	 * 소음 보고 집계 창(초). 한 발화자/무전기당 이 간격보다 자주 쏘지 않는다.
+	 *
+	 * ★ 프레임마다(20ms) 쏘면 초당 50회 x 인원수의 perception 갱신이 돌아
+	 *   서버가 죽는다. 0.3초면 초당 3.3회로 떨어진다(7-5절).
+	 */
+	inline constexpr float NoiseWindowSec = 0.3f;
+
+	/**
+	 * 소음 이벤트에 넣는 Loudness. **1.0 고정이다.**
+	 *
+	 * ★ 왜 발화 모드별로 다르게 주지 않는가:
+	 *   UAISense_Hearing::Update 는 Loudness 를 **반경 배율로 쓴다**(위 GetLoudnessScale
+	 *   주석 참고). 모드별 값을 그대로 넣으면 NPC 가 듣는 거리가
+	 *   GetNoiseRange x GetLoudnessScale 로 바뀌어 아래 두 가지가 동시에 깨진다:
+	 *
+	 *     · MOU.Voice.ShowRadius 의 빨간 원이 실제 판정과 어긋난다
+	 *     · NPC 에디터의 `듣기 범위` 도 Loudness 만큼 축소·확대된다
+	 *       (첫 번째 비교식이 리스너의 HearingRangeSq 에도 곱하기 때문)
+	 *
+	 *   1.0 으로 고정하면 판정이 이렇게 단순해진다:
+	 *
+	 *       실제로 들리는 거리 = min(NPC 의 듣기 범위, GetNoiseRange(모드))
+	 *
+	 *   양쪽이 각자 뚜렷한 의미를 갖는다 - NPC 는 "이 개체가 들을 수 있는 최대치",
+	 *   우리는 "이 발화가 퍼지는 거리". 속삭임과 외침의 차이는 **반경으로만**
+	 *   표현한다(700 vs 4000). NPC 입장에서 "가까이서만 들리는 소리 = 작은 소리" 다.
+	 */
+	inline constexpr float NoiseEventLoudness = 1.0f;
+
+	/**
+	 * 무전 송신 중 **육성** 소음의 반경 배율.
+	 *
+	 * 무전을 치는 동안에도 입으로는 소리가 난다(2절). 다만 무전기에 대고
+	 * 낮게 말하므로 평소보다 좁게 퍼진다.
+	 */
+	inline constexpr float RadioSpeakingNoiseScale = 0.35f;
+
+	/** 무전기 스피커에서 나는 소음의 반경 배율. SpeakerNoiseRadius 에 곱한다. */
+	inline constexpr float RadioSpeakerNoiseScale = 0.8f;
+
+	/**
+	 * 소음 태그. **NPC 담당자가 이 값으로 반응을 분기한다 - 함부로 바꾸면 안 된다.**
+	 *
+	 * ★ 전역 FName 상수로 두지 않고 함수로 감싼 이유: FName 은 정적 초기화 순서에
+	 *   의존하는데, 전역 객체로 두면 FName 테이블이 준비되기 전에 생성될 수 있다.
+	 *   호출은 0.3초에 한 번뿐이라 매번 만들어도 비용이 문제되지 않는다.
+	 */
+	inline FName GetProximityNoiseTag()    { return FName(TEXT("Voice.Proximity")); }
+	inline FName GetRadioNoiseTag()        { return FName(TEXT("Voice.Radio")); }
+	inline FName GetRadioSpeakerNoiseTag() { return FName(TEXT("Voice.RadioSpeaker")); }
 
 	/**
 	 * 네트워크로 받은 enum 을 신뢰 가능한 범위로 자른다.
@@ -476,6 +679,22 @@ struct FVoiceFrameOut
 
 	/** 말하는 중 UI 표시(아이콘/게이지)에 쓴다. */
 	UPROPERTY() uint8 Loudness = 0;
+
+	/**
+	 * ★ 무전 라우트일 때만 채워진다 - **소리가 나야 할 무전기 액터**다.
+	 *
+	 *   무전을 받으면 소리는 발신자가 아니라 **듣는 쪽 근처의 무전기**에서 난다.
+	 *   그게 이 설계의 핵심 재미다(7-4절): 무전을 수신하면 내 무전기가 소리를 내고,
+	 *   그 소리를 주변 사람도 NPC 도 듣는다. 숨어 있는데 팀원이 무전을 치면 들킨다.
+	 *
+	 *   그래서 위치의 출처가 근접과 완전히 다르다:
+	 *     근접 → SpeakerId 로 **발신자 폰**을 찾아 거기서 재생
+	 *     무전 → 이 액터(**듣는 쪽 근처의 무전기**) 위치에서 재생
+	 *
+	 *   바닥에 떨어진 무전기도 그냥 액터이므로 코드가 두 경우를 구분할 필요가 없다.
+	 *   시체 옆에 켜진 채 남은 무전기가 계속 소리를 내는 연출이 공짜로 나온다.
+	 */
+	UPROPERTY() TObjectPtr<AActor> RadioActor = nullptr;
 
 	UPROPERTY() TArray<uint8> Opus;
 };

@@ -10,6 +10,11 @@
 #include "Net/UnrealNetwork.h"
 #include "Components/CapsuleComponent.h"
 #include "Player/MainCharacter.h"
+#include "AbilitySystemComponent.h"
+#include "Ability/GA_CarryItem.h"
+#include "Ability/GA_HeavyCarry.h"
+#include "Ability/GA_CarryCharacter.h"
+#include "Components/InventoryComponent.h"
 
 UCarryingComponent::UCarryingComponent()
 {
@@ -104,15 +109,6 @@ void UCarryingComponent::GrabOrDrop()
 			{
 				Item->Drop(DropLoc, GetOwner());
 			}
-
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
-			{
-				if (Char->BaseAttribute)
-				{
-					float NewWeight = FMath::Max(0.0f, Char->BaseAttribute->GetCurrentWeight() - Item->ItemWeight);
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
-			}
 		}
 		else if (AMainCharacter* CharacterToDrop = Cast<AMainCharacter>(CarriedActor))
 		{
@@ -129,15 +125,6 @@ void UCarryingComponent::GrabOrDrop()
 			{
 				MoveComp->SetMovementMode(MOVE_Falling);
 			}
-
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
-			{
-				if (Char->BaseAttribute)
-				{
-					float NewWeight = FMath::Max(0.0f, Char->BaseAttribute->GetCurrentWeight() - 50.0f);
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
-			}
 		}
 		
 		// 내려놓을 때 표정 복구
@@ -146,7 +133,18 @@ void UCarryingComponent::GrabOrDrop()
 			MainChar->ChangeEmotion(MainChar->EmotionIndex_Normal);
 		}
 
+		if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
+		{
+			if (Char->GetAbilitySystemComponent() && ActiveCarryAbilitySpecHandle.IsValid())
+			{
+				Char->GetAbilitySystemComponent()->CancelAbilityHandle(ActiveCarryAbilitySpecHandle);
+				Char->GetAbilitySystemComponent()->ClearAbility(ActiveCarryAbilitySpecHandle);
+				ActiveCarryAbilitySpecHandle = FGameplayAbilitySpecHandle();
+			}
+		}
+
 		CarriedActor = nullptr;
+		UpdateCharacterTotalWeight();
 		OnCarriedStateChanged.Broadcast(nullptr);
 		return;
 	}
@@ -297,25 +295,7 @@ void UCarryingComponent::GrabOrDrop()
 			}
 			
 
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
-			{
-				if (Char->BaseAttribute)
-				{
-					float AddedWeight = 0.0f;
-					if (HitItem)
-					{
-						AddedWeight = HitItem->ItemWeight;
-					}
-					else if (HitCharacter)
-					{
-						// 사람을 들었을 때의 고정 무게 (예: 50.0f)
-						AddedWeight = 50.0f;
-					}
-					
-					float NewWeight = Char->BaseAttribute->GetCurrentWeight() + AddedWeight;
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
-			}
+			UpdateCharacterTotalWeight();
 
 			// 표정 변화 적용
 			if (AMainCharacter* MainChar = Cast<AMainCharacter>(GetOwner()))
@@ -330,6 +310,37 @@ void UCarryingComponent::GrabOrDrop()
 					{
 						MainChar->ChangeEmotion(MainChar->EmotionIndex_HeavyPackage);
 					}
+				}
+			}
+
+			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
+			{
+				if (UAbilitySystemComponent* ASC = Char->GetAbilitySystemComponent())
+				{
+					if (ActiveCarryAbilitySpecHandle.IsValid())
+					{
+						ASC->CancelAbilityHandle(ActiveCarryAbilitySpecHandle);
+						ASC->ClearAbility(ActiveCarryAbilitySpecHandle);
+						ActiveCarryAbilitySpecHandle = FGameplayAbilitySpecHandle();
+					}
+
+					AMainCharacter* MainCharOwner = Cast<AMainCharacter>(Char);
+					TSubclassOf<UGameplayAbility> AbilityClassToGive = (MainCharOwner && MainCharOwner->CarryItemAbilityClass) ? MainCharOwner->CarryItemAbilityClass : TSubclassOf<UGameplayAbility>(UGA_CarryItem::StaticClass());
+					
+					if (HitCharacter)
+					{
+						AbilityClassToGive = (MainCharOwner && MainCharOwner->CarryCharacterAbilityClass) ? MainCharOwner->CarryCharacterAbilityClass : TSubclassOf<UGameplayAbility>(UGA_CarryCharacter::StaticClass());
+					}
+					else if (APackageBase* Package = Cast<APackageBase>(HitItem))
+					{
+						if (Package->PackageType == EPackageType::Heavy)
+						{
+							AbilityClassToGive = (MainCharOwner && MainCharOwner->HeavyCarryAbilityClass) ? MainCharOwner->HeavyCarryAbilityClass : TSubclassOf<UGameplayAbility>(UGA_HeavyCarry::StaticClass());
+						}
+					}
+
+					ActiveCarryAbilitySpecHandle = ASC->GiveAbility(FGameplayAbilitySpec(AbilityClassToGive, 1));
+					ASC->TryActivateAbility(ActiveCarryAbilitySpecHandle);
 				}
 			}
 
@@ -371,15 +382,6 @@ void UCarryingComponent::Throw()
 			// 캐릭터의 전방과 위쪽(사선) 방향으로 힘(임펄스) 계산
 			FVector ThrowVel = GetOwner()->GetActorForwardVector() * DefaultThrowForce + FVector(0, 0, DefaultThrowForce * 0.4f);
 			Item->Throw(ThrowVel, GetOwner());
-
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
-			{
-				if (Char->BaseAttribute)
-				{
-					float NewWeight = FMath::Max(0.0f, Char->BaseAttribute->GetCurrentWeight() - Item->ItemWeight);
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
-			}
 		}
 		else if (AMainCharacter* CharacterToThrow = Cast<AMainCharacter>(CarriedActor))
 		{
@@ -398,15 +400,6 @@ void UCarryingComponent::Throw()
 				// 캐릭터 런치
 				CharacterToThrow->LaunchCharacter(ThrowVel, true, true);
 			}
-
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
-			{
-				if (Char->BaseAttribute)
-				{
-					float NewWeight = FMath::Max(0.0f, Char->BaseAttribute->GetCurrentWeight() - 50.0f);
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
-			}
 		}
 
 		// 던질 때 표정 복구
@@ -414,9 +407,20 @@ void UCarryingComponent::Throw()
 		{
 			MainChar->ChangeEmotion(MainChar->EmotionIndex_Normal);
 		}
+
+		if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
+		{
+			if (Char->GetAbilitySystemComponent() && ActiveCarryAbilitySpecHandle.IsValid())
+			{
+				Char->GetAbilitySystemComponent()->CancelAbilityHandle(ActiveCarryAbilitySpecHandle);
+				Char->GetAbilitySystemComponent()->ClearAbility(ActiveCarryAbilitySpecHandle);
+				ActiveCarryAbilitySpecHandle = FGameplayAbilitySpecHandle();
+			}
+		}
 	}
 	
 	CarriedActor = nullptr;
+	UpdateCharacterTotalWeight();
 	OnCarriedStateChanged.Broadcast(nullptr);
 	UE_LOG(LogTemp, Log, TEXT("물건을 던졌습니다."));
 }
@@ -459,17 +463,7 @@ void UCarryingComponent::MulticastEquipItem_Implementation(AActor* ItemToEquip)
 
 	if (GetOwner()->HasAuthority())
 	{
-		if (AItemBase* Item = Cast<AItemBase>(CarriedActor))
-		{
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
-			{
-				if (Char->BaseAttribute)
-				{
-					float NewWeight = Char->BaseAttribute->GetCurrentWeight() + Item->ItemWeight;
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
-			}
-		}
+		UpdateCharacterTotalWeight();
 	}
 
 	OnCarriedStateChanged.Broadcast(CarriedActor);
@@ -485,21 +479,62 @@ void UCarryingComponent::ClearCarriedItem()
 
 void UCarryingComponent::MulticastClearCarriedItem_Implementation()
 {
+	CarriedActor = nullptr;
+
 	if (GetOwner()->HasAuthority())
 	{
-		if (AItemBase* Item = Cast<AItemBase>(CarriedActor))
+		UpdateCharacterTotalWeight();
+	}
+
+	OnCarriedStateChanged.Broadcast(nullptr);
+}
+
+void UCarryingComponent::UpdateCharacterTotalWeight()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	ACharacterBase* Char = Cast<ACharacterBase>(GetOwner());
+	if (!Char || !Char->BaseAttribute)
+	{
+		return;
+	}
+
+	float TotalWeight = 0.0f;
+
+	// 1. 현재 손에 든 물건 무게
+	if (AItemBase* HandItem = Cast<AItemBase>(CarriedActor))
+	{
+		if (APackageBase* Package = Cast<APackageBase>(HandItem))
 		{
-			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
+			if (Package->AppliedWeightMap.Contains(Char))
 			{
-				if (Char->BaseAttribute)
-				{
-					float NewWeight = FMath::Max(0.0f, Char->BaseAttribute->GetCurrentWeight() - Item->ItemWeight);
-					Char->BaseAttribute->SetCurrentWeight(NewWeight);
-				}
+				TotalWeight += Package->AppliedWeightMap[Char];
+			}
+		}
+		else
+		{
+			TotalWeight += HandItem->ItemWeight;
+		}
+	}
+	else if (AMainCharacter* CarriedChar = Cast<AMainCharacter>(CarriedActor))
+	{
+		TotalWeight += 50.0f; // 시체 운반 기본 무게
+	}
+
+	// 2. 인벤토리 슬롯에 보관 중인 모든 아이템 무게 합산
+	if (UInventoryComponent* InvComp = Char->FindComponentByClass<UInventoryComponent>())
+	{
+		for (AItemBase* SlotItem : InvComp->InventorySlots)
+		{
+			if (SlotItem)
+			{
+				TotalWeight += SlotItem->ItemWeight;
 			}
 		}
 	}
 
-	CarriedActor = nullptr;
-	OnCarriedStateChanged.Broadcast(nullptr);
+	Char->BaseAttribute->SetCurrentWeight(TotalWeight);
 }

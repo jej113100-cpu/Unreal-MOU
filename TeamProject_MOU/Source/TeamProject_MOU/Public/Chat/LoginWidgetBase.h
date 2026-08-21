@@ -58,7 +58,7 @@ public:
 	 * 접속할 채팅 서버. **비워두는 것이 기본이자 권장값이다.**
 	 *
 	 * 비어 있으면(호스트가 빈 문자열, 포트가 0) 접속 직전에
-	 * UMOUChatServerSettings 가 정한 주소를 쓴다 — 즉 Config/DefaultGame.ini 의
+	 * UMOUServerSettings 가 정한 주소를 쓴다 — 즉 Config/DefaultGame.ini 의
 	 * 팀 공유 주소다. 팀원 전원이 같은 서버를 보게 하려면 여기를 건드리지 않으면 된다.
 	 *
 	 * ★ 여기에 127.0.0.1 을 적으면 안 된다. 그 값은 "이 게임이 돌고 있는 PC" 를 뜻해서

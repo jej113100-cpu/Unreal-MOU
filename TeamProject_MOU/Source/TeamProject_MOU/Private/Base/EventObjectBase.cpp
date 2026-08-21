@@ -4,6 +4,7 @@
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
 #include "Components/WidgetComponent.h"
+#include "Net/UnrealNetwork.h"
 
 AEventObjectBase::AEventObjectBase()
 {
@@ -50,6 +51,13 @@ void AEventObjectBase::BeginPlay()
 		InfoWidgetComponent->DestroyComponent();
 		InfoWidgetComponent = nullptr;
 	}
+}
+
+void AEventObjectBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AEventObjectBase, CurrentPushers);
 }
 
 
@@ -142,7 +150,7 @@ void AEventObjectBase::Interact_Implementation(AActor* Interactor)
 
 void AEventObjectBase::AddPusher(AMainCharacter* Pusher)
 {
-	if (Pusher && !CurrentPushers.Contains(Pusher))
+	if (HasAuthority() && Pusher && !CurrentPushers.Contains(Pusher))
 	{
 		CurrentPushers.Add(Pusher);
 	}
@@ -150,7 +158,7 @@ void AEventObjectBase::AddPusher(AMainCharacter* Pusher)
 
 void AEventObjectBase::RemovePusher(AMainCharacter* Pusher)
 {
-	if (Pusher && CurrentPushers.Contains(Pusher))
+	if (HasAuthority() && Pusher && CurrentPushers.Contains(Pusher))
 	{
 		CurrentPushers.Remove(Pusher);
 	}
@@ -158,7 +166,43 @@ void AEventObjectBase::RemovePusher(AMainCharacter* Pusher)
 
 bool AEventObjectBase::IsReadyToMove() const
 {
-	return CurrentPushers.Num() >= RequiredPushers;
+	if (CurrentPushers.Num() < RequiredPushers)
+	{
+		return false;
+	}
+
+	if (RequiredPushers <= 1)
+	{
+		return true;
+	}
+
+	// 2인 이상 협동 오브젝트: 필요한 인원수만큼 모두 같은 방향으로 밀거나 당기고 있는지 확인
+	float CommonSign = 0.0f;
+	int32 ActivePusherCount = 0;
+
+	for (const TObjectPtr<AMainCharacter>& Pusher : CurrentPushers)
+	{
+		if (Pusher)
+		{
+			float Input = Pusher->GetCurrentPushInput();
+			if (FMath::Abs(Input) > 0.1f)
+			{
+				float Sign = FMath::Sign(Input);
+				if (CommonSign == 0.0f)
+				{
+					CommonSign = Sign;
+				}
+				else if (CommonSign != Sign)
+				{
+					// 서로 반대 방향으로 밀고 당김 (충돌 -> 이동 불가)
+					return false;
+				}
+				ActivePusherCount++;
+			}
+		}
+	}
+
+	return ActivePusherCount >= RequiredPushers;
 }
 
 void AEventObjectBase::MulticastFallOffLedge_Implementation()
@@ -170,7 +214,7 @@ void AEventObjectBase::FallOffLedge()
 {
 	// 상자를 밀던 모든 플레이어의 밀기 모드 강제 해제
 	// StopPushMode가 내부적으로 RemovePusher를 호출하여 배열을 수정하므로, 복사본을 만들어 순회하여 크래시 방지
-	TArray<AMainCharacter*> PushersCopy = CurrentPushers;
+	TArray<TObjectPtr<AMainCharacter>> PushersCopy = CurrentPushers;
 	for (AMainCharacter* Pusher : PushersCopy)
 	{
 		if (Pusher)

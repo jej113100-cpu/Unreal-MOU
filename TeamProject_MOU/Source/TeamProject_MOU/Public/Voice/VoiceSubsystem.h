@@ -151,6 +151,41 @@ public:
 	bool IsCaptureReady() const;
 
 	/**
+	 * 내가 지금 음성 사망 상태인가(말하기·듣기 모두 차단).
+	 *
+	 * 판정은 UVoiceComponent 가 들고 있다 - 서버가 정하고 복제해 오는 값이다.
+	 * 여기서는 그걸 그대로 물어본다.
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	bool IsVoiceDead() const;
+
+	/**
+	 * 무전 송신(PTT)을 켜고 끈다. 설계상 `X` 키 홀드에 대응한다(V6).
+	 *
+	 * 켜져 있는 동안 내 목소리가 **근접과 무전 양쪽으로** 나간다 - 무전을 쳐도
+	 * 입으로는 실제로 소리를 내고 있기 때문이다(2절). 근처 사람은 육성으로 듣고,
+	 * 멀리 있는 사람은 무전기로 듣는다. 겹치지 않게 하는 것은 서버 몫이다.
+	 *
+	 * ★ 실제로 무전이 나가는지는 서버가 정한다 - 무전기를 들고 있는지,
+	 *   켜져 있는지, 채널이 비었는지를 전부 서버가 다시 확인한다.
+	 *   여기서 켰다고 나가는 것이 아니다.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MOU|Voice")
+	void SetRadioTransmitting(bool bTransmitting);
+
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	bool IsRadioTransmitting() const { return bRadioTransmitting; }
+
+	/**
+	 * 사망 상태를 서버에 요청한다(테스트용, `MOU.Voice.Die` / `MOU.Voice.Revive`).
+	 *
+	 * ★ 나중에 실제 게임 로직(체력 0 -> 사망)과 엮이면 이 함수는 사라진다.
+	 *   사망 판정은 서버가 하는 것이지 클라가 요청할 일이 아니다.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MOU|Voice")
+	void RequestVoiceDead(bool bDead);
+
+	/**
 	 * 지금 말하고 있는지 (VAD 판정). NPC 소음 발생 조건이자 UI 표시용이다.
 	 * V8 에서 소음 이벤트의 입력이 된다.
 	 */
@@ -174,15 +209,59 @@ public:
 	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
 	float GetMicSensitivity() const;
 
+	/**
+	 * 주변 소음을 측정해 마이크 감도를 자동으로 맞춘다.
+	 *
+	 * **측정하는 동안 말하지 말아야 한다.** 조용한 상태의 최대 음량을 재서
+	 * 그보다 확실히 위에 기준을 놓는 방식이라, 말소리가 섞이면 기준이 너무
+	 * 높아져서 이번엔 아무것도 안 잡히게 된다.
+	 *
+	 * 측정 중에는 **아무것도 전송하지 않는다** - 조용히 있으라고 해놓고 그
+	 * 소리를 남에게 보내면 곤란하다.
+	 *
+	 * ★ 기본값이 리터럴인 이유: UHT 가 UFUNCTION 의 기본 인자로 네임스페이스
+	 *   상수를 읽지 못한다("C++ Default parameter not parsed"). 대신 구현부에
+	 *   static_assert 를 두어 MOUVoice::DefaultCalibrationSeconds 와 어긋나면
+	 *   빌드가 깨지게 해 두었다.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MOU|Voice")
+	void BeginSensitivityCalibration(float DurationSeconds = 2.0f);
+
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	bool IsCalibrating() const { return bCalibrating; }
+
+	/** 보정이 끝나기까지 남은 시간(초). 보정 중이 아니면 0. */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	float GetCalibrationRemainingSeconds() const;
+
+	/**
+	 * 캡처 객체를 버리고 다시 연다.
+	 *
+	 * ★★ **새로 꽂은 장치는 이걸로 못 잡는다.** 엔진이 오디오 장치 목록을
+	 *    `Voice` 모듈이 로드될 때 **한 번만** 열거하고 그 결과를 싱글턴
+	 *    (`FVoiceCaptureDeviceWindows`)에 캐시하기 때문이다. 캡처를 새로
+	 *    만들어도 그 캐시된 목록에서 이름을 찾아 열 뿐이다.
+	 *
+	 *    즉 **에디터를 켠 뒤에 헤드셋을 꽂았다면 에디터를 재시작해야 한다.**
+	 *    (Windows 기본 입력 장치를 바꾼 경우도 마찬가지다 - 기본 장치 이름이
+	 *    시작 시점 값으로 캐시돼 있다)
+	 *
+	 *    이 함수가 쓸모 있는 경우는 **장치는 시작할 때부터 있었는데 캡처만
+	 *    실패한** 상황이다 - 다른 프로그램이 마이크를 잡고 있었다거나, 권한을
+	 *    나중에 켰다거나. 그때는 에디터를 안 껐다 켜도 된다.
+	 *
+	 *    장치 목록까지 새로 읽으려면 `Voice` 모듈을 통째로 언로드했다 다시
+	 *    로드해야 한다(그때 싱글턴이 파괴되고 재열거된다). 그러려면 살아있는
+	 *    인코더·디코더·재생 스트림을 **전부 먼저 놓아야** 해서 위험하다.
+	 *    자동 감지는 V9 에서 그 방식으로 다룬다.
+	 *
+	 * @return 마이크가 실제로 열렸으면 true.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MOU|Voice")
+	bool ReopenCapture();
+
 	/** 진단용 통계를 한 줄 문자열로. MOU.Voice.Stat 이 쓴다. */
 	FString GetStatsString() const;
-
-private:
-	/** 게임 스레드 틱. 마이크를 폴링해 재생 버퍼로 넘긴다. */
-	bool Tick(float DeltaTime);
-
-	/** 재생용 신스 컴포넌트를 만든다(루프백을 처음 켤 때). */
-	void EnsurePlaybackComponent();
 
 	/**
 	 * 내 PlayerController 의 음성 창구를 얻는다. 없으면 null.
@@ -191,6 +270,13 @@ private:
 	 * (레벨 이동, 재접속) 캐시가 자동으로 풀리도록 약참조로 들고 있는다.
 	 */
 	UVoiceComponent* GetVoiceComponent();
+
+private:
+	/** 게임 스레드 틱. 마이크를 폴링해 재생 버퍼로 넘긴다. */
+	bool Tick(float DeltaTime);
+
+	/** 재생용 신스 컴포넌트를 만든다(루프백을 처음 켤 때). */
+	void EnsurePlaybackComponent();
 
 	/** 지금 로컬 플레이어의 PlayerController. 없으면 null. */
 	APlayerController* GetOwningPlayerController() const;
@@ -240,6 +326,23 @@ private:
 	/** 서버로 보낸 프레임 수. 루프백 통계와 구분해서 센다. */
 	int32 FramesTransmitted = 0;
 
+	/** 측정한 값으로 감도를 확정한다. */
+	void FinishCalibration();
+
+	// --- 감도 자동 보정 상태 -------------------------------------------------
+	bool   bCalibrating        = false;
+	double CalibrationEndTime  = 0.0;
+
+	/**
+	 * 측정 구간에서 관찰한 **최대** 음량.
+	 *
+	 * 평균이 아니라 최대를 쓰는 이유: 평균으로 기준을 잡으면 키보드 소리나
+	 * 에어컨이 잠깐 커지는 순간마다 발화로 오인식된다. 잡음의 봉우리를
+	 * 넘겨야 조용할 때 확실히 조용하다.
+	 */
+	float  CalibrationPeak     = 0.f;
+	int32  CalibrationSamples  = 0;
+
 	/**
 	 * 재생 컴포넌트.
 	 *
@@ -272,6 +375,9 @@ private:
 	 * bIsSpeaking 하나만으로는 "지금 상태" 만 알 수 있어 전환 시점을 못 잡는다.
 	 */
 	bool bWasSpeaking = false;
+
+	/** 무전 송신 중인지(설계상 `X` 홀드). 서버가 자격을 다시 확인한다. */
+	bool bRadioTransmitting = false;
 
 	/** 지금 발화 모드. V9 에서 키/UI 로 바꾸게 되고, 지금은 콘솔로만 바꾼다. */
 	EVoiceMode VoiceMode = EVoiceMode::Normal;

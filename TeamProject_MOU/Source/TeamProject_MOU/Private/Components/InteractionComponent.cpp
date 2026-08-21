@@ -100,70 +100,34 @@ void UInteractionComponent::UpdateFocusedInteractable()
 
 	AActor* NewFocusedActor = nullptr;
 	
-	// 일반 상호작용 검사
 	if (bHit && HitResult.GetActor())
 	{
-		if (HitResult.GetActor()->Implements<UInteractableInterface>() || HitResult.GetActor()->Implements<UPushableInterface>())
+		AActor* HitActor = HitResult.GetActor();
+
+		// 대상이 메인 캐릭터인 경우: 오직 그로기 상태이고 사망하지 않았으며 자신(본인)이 아닐 때만 포커스
+		if (AMainCharacter* TargetChar = Cast<AMainCharacter>(HitActor))
 		{
-			NewFocusedActor = HitResult.GetActor();
-		}
-	}
-
-	// [추가] 주변의 그로기(Groggy) 상태 플레이어 감지 (카메라 방향과 무관하게 일정 거리 내에 있으면 살리기 가능)
-	// 혹은 시야에 들어온 플레이어가 거리가 좀 멀어도 부활 가능하도록 범위 설정
-	float ReviveDistance = 300.0f; // 살리기 가능한 반경
-	bool bDrawDebug = true; // 디버그 라인 출력 켜기/끄기
-	
-	if (bDrawDebug)
-	{
-		DrawDebugSphere(GetWorld(), OwnerActor->GetActorLocation(), ReviveDistance, 16, FColor::Green, false, -1.0f, 0, 1.0f);
-	}
-
-	// 겹치는 캐릭터 찾기
-	TArray<AActor*> OverlappedActors;
-	UKismetSystemLibrary::SphereOverlapActors(
-		this,
-		OwnerActor->GetActorLocation(),
-		ReviveDistance,
-		{ UEngineTypes::ConvertToObjectType(ECC_Pawn) },
-		AMainCharacter::StaticClass(),
-		{ OwnerActor },
-		OverlappedActors
-	);
-
-	for (AActor* Actor : OverlappedActors)
-	{
-		if (AMainCharacter* OtherChar = Cast<AMainCharacter>(Actor))
-		{
-			// 대상이 그로기 상태이고 죽지 않았다면 상호작용 대상으로 최우선 지정
-			if (OtherChar->bIsGroggy && !OtherChar->bIsDead)
+			if (TargetChar->bIsGroggy && !TargetChar->bIsDead && TargetChar != OwnerActor)
 			{
-				NewFocusedActor = OtherChar;
-				if (bDrawDebug)
-				{
-					DrawDebugLine(GetWorld(), OwnerActor->GetActorLocation(), OtherChar->GetActorLocation(), FColor::Red, false, -1.0f, 0, 3.0f);
-				}
-				break; // 한 명만 찾으면 종료
+				NewFocusedActor = TargetChar;
 			}
+		}
+		else if (HitActor->Implements<UInteractableInterface>())
+		{
+			if (IInteractableInterface::Execute_CanInteract(HitActor, OwnerActor))
+			{
+				NewFocusedActor = HitActor;
+			}
+		}
+		else if (HitActor->Implements<UPushableInterface>())
+		{
+			NewFocusedActor = HitActor;
 		}
 	}
 
 	if (FocusedActor != NewFocusedActor)
 	{
-		// 이전 포커스 대상의 UI 끄기
-		if (AMainCharacter* OldChar = Cast<AMainCharacter>(FocusedActor))
-		{
-			OldChar->SetReviveUIVisibility(false);
-		}
-
 		FocusedActor = NewFocusedActor;
-
-		// 새 포커스 대상의 UI 켜기
-		if (AMainCharacter* NewChar = Cast<AMainCharacter>(FocusedActor))
-		{
-			NewChar->SetReviveUIVisibility(true);
-		}
-
 		OnFocusedInteractableChanged.Broadcast(FocusedActor);
 	}
 }
