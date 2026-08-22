@@ -8,18 +8,19 @@ class UBoxComponent;
 class UPrimitiveComponent;
 
 /**
- * 무기 대상 진영 (피아식별용)
- * 프로젝트에 이미 정의된 Trace Channel과 매핑:
- *   ECC_GameTraceChannel1 = "NPC"    (적)
- *   ECC_GameTraceChannel2 = "Player"
+ * 무기 대상 판정 (피아식별용)
+ * 콜리전 채널이 아니라 코드에서 대상 클래스로 판정한다.
+ * (트레이스는 Visibility로 넓게 쏘고, 맞은 대상을 IsValidTarget으로 걸러냄)
  */
 UENUM(BlueprintType)
 enum class EWeaponTargetTeam : uint8
 {
+	// 본인(든 플레이어)만 빼고 모든 캐릭터를 맞힘 (테이저건 등)
+	AllButSelf	UMETA(DisplayName = "All But Self"),
 	// 적(NPC)만 맞힘
-	Enemy		UMETA(DisplayName = "Enemy (NPC)"),
-	// 플레이어만 맞힘
-	Player		UMETA(DisplayName = "Player")
+	Enemy		UMETA(DisplayName = "Enemy (NPC only)"),
+	// 다른 플레이어만 맞힘
+	Player		UMETA(DisplayName = "Player only")
 };
 
 /**
@@ -51,26 +52,54 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	// [WEAPON] 내구도는 ItemBase의 CurrentDurability/MaxDurability를 사용한다.
+	//   (CurrentDurability는 ItemBase에서 이미 복제되므로 무기용 별도 복제 변수는 두지 않는다)
+	//   던질 때마다 서버에서 1씩 차감하고, 0 이하가 되면 더 발사할 수 없다.
+
+#pragma region [WEAPON] 소유권 (Server RPC 전제)
+	// [WEAPON-010] 집을 때 소유권 설정 → 클라가 ServerFire RPC 보낼 수 있게 함
+	// (Owner 없으면 "No owning connection"으로 ServerRPC가 버려짐)
+	virtual void PickUp_Implementation(AActor* Picker) override;
+
+	// [WEAPON-011] 놓을 때 소유권 해제
+	virtual void Drop_Implementation(FVector DropLocation, AActor* Dropper = nullptr) override;
+
+	// [WEAPON-012] 던질 때 소유권 해제
+	virtual void Throw_Implementation(FVector ThrowVelocity, AActor* Thrower = nullptr) override;
+#pragma endregion
 
 #pragma region [WEAPON] 사용/발사 흐름 (공통)
-	// [WEAPON-000] 좌클릭: 잔여 횟수 체크 → 차감 → 서버 권한에서 Fire() 호출
+	// [WEAPON-000] 좌클릭: 잔여 횟수 체크 → (서버)차감 → Fire() 호출
 	virtual void OnUse_Implementation() override;
 
 	// [WEAPON-007] 실제 발사 로직. 자식이 override (테이저=트레이스, 칼=콜라이더 등)
 	virtual void Fire();
 
+	// [WEAPON-013] 이 발사에서 내구도(CurrentDurability)를 차감할지 여부.
+	// 기본 true(소모). 발사 시점에 소모하지 않는 무기(예: 적중 시에만 닳는 부메랑)는 false로 override한다.
+	virtual bool ShouldConsumeUseOnFire() const { return true; }
+
+	// [WEAPON-014] 발사 1회당 깎일 내구도 양. 무기마다 다르게(테이저=25 등) override.
+	// ShouldConsumeUseOnFire()가 true일 때만 TryFireOnServer에서 이 값만큼 차감한다.
+	virtual float GetDurabilityCostPerUse() const { return 1.0f; }
+
 private:
-	// [WEAPON-008] 클라이언트에서 눌렀을 때 서버로 발사 위임
+	// [WEAPON-008] 클라이언트에서 눌렀을 때 서버로 발사 위임 (서버에서 차감+발사)
 	UFUNCTION(Server, Reliable)
 	void ServerFire();
+
+	// [WEAPON-009] 서버에서 잔여 체크 → 차감 → Fire (OnUse/ServerFire 공통 진입점)
+	void TryFireOnServer();
 
 protected:
 #pragma endregion
 
 #pragma region [WEAPON] 설정값
-	// 이 무기가 노리는 진영 (피아식별)
+	// 이 무기가 노리는 대상 (피아식별). 기본은 본인 제외 모든 캐릭터.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Weapon")
-	EWeaponTargetTeam TargetTeam = EWeaponTargetTeam::Enemy;
+	EWeaponTargetTeam TargetTeam = EWeaponTargetTeam::AllButSelf;
 
 	// 근접/원거리 명중 방식
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Weapon")
@@ -107,8 +136,10 @@ protected:
 #pragma endregion
 
 protected:
-	// [WEAPON-005] TargetTeam을 실제 트레이스 채널(ECollisionChannel)로 변환
-	ECollisionChannel GetTargetTraceChannel() const;
+	// [WEAPON-005] 대상이 이 무기의 유효 타겟인지 판정 (피아식별 코드 판정)
+	// TargetTeam에 따라: AllButSelf=본인 뺀 모든 캐릭터, Enemy=NPC만, Player=다른 플레이어만
+	// 자식이 필요하면 override 가능
+	virtual bool IsValidTarget(AActor* HitActor) const;
 
 // ---------------------------------------------------------------------------
 // [WEAPON] 원거리 발사체 (Projectile) - 현재 미사용, 주석 처리.

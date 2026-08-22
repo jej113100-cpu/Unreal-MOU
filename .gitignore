@@ -80,3 +80,15 @@ Desktop.ini
 !*.md
 CLAUDE.md
 Daily_Work_Log.md
+
+# 채팅 서버가 실행 중에 만드는 로그 DB (6단계).
+# -wal / -shm 은 WAL 모드에서 함께 생기는 곁다리 파일이다.
+# ThirdParty/sqlite/ 의 sqlite3.c/h 는 소스이므로 여기 해당하지 않는다.
+chat_log.db
+chat_log.db-wal
+chat_log.db-shm
+
+# Server / TestClient 를 CMake 로 빌드한 산출물 (Server.exe, TestClient.exe,
+# CMakeCache.txt, build.ninja 등). *.exe 는 이미 위에서 걸러지지만 CMakeFiles/ 등
+# 확장자 없는 중간 파일까지 한 번에 막으려고 out/ 디렉터리를 통째로 무시한다.
+MOU_Server/out/

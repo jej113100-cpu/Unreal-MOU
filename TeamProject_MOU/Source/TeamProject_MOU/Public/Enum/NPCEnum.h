@@ -3,50 +3,64 @@
 #include "CoreMinimal.h"
 #include "NPCEnum.generated.h"
 
-/* NPC Á¾·ù */
+/* NPC ì¢…ë¥˜ */
 UENUM(BlueprintType)
 enum class ENpcType : uint8
 {
-	Normal		UMETA(DisplayName = "Nomal", ToolTip = "±âº» NPC"),
-	Push		UMETA(DisplayName = "Push", ToolTip = "ÇÃ·¹ÀÌ¾î¸¦ ¹Ì´Â NPC"),
-	Shop		UMETA(DisplayName = "Shop", ToolTip = "»óÁ¡ NPC"),
-	Quest		UMETA(DisplayName = "Quest", ToolTip = "Äù½ºÆ® NPC"),
-	Stun		UMETA(DisplayName = "Stun", ToolTip = "ÇÃ·¹ÀÌ¾î¸¦ ±âÀı½ÃÅ°´Â NPC"),
-	Snatch		UMETA(DisplayName = "Snatch", ToolTip = "ÇÃ·¹ÀÌ¾îÀÇ ¹°°ÇÀ» »¯¾î¼­ µµ¸Á°¡´Â NPC"),
-	Hold		UMETA(DisplayName = "Hold", ToolTip = "ÇÃ·¹ÀÌ¾î¸¦ µå´Â NPC"),
-	Blocking	UMETA(DisplayName = "Blocking", ToolTip = "ÇÃ·¹ÀÌ¾îÀÇ ±æÀ» ¸·´Â NPC")
+	Normal		UMETA(DisplayName = "Nomal", ToolTip = "ê¸°ë³¸ NPC"),
+	Push		UMETA(DisplayName = "Push", ToolTip = "í”Œë ˆì´ì–´ë¥¼ ë¯¸ëŠ” NPC"),
+	Shop		UMETA(DisplayName = "Shop", ToolTip = "ìƒì  NPC"),
+	Quest		UMETA(DisplayName = "Quest", ToolTip = "í€˜ìŠ¤íŠ¸ NPC"),
+	Stun		UMETA(DisplayName = "Stun", ToolTip = "í”Œë ˆì´ì–´ë¥¼ ê¸°ì ˆì‹œí‚¤ëŠ” NPC"),
+	Snatch		UMETA(DisplayName = "Snatch", ToolTip = "í”Œë ˆì´ì–´ì˜ ë¬¼ê±´ì„ ëºì–´ì„œ ë„ë§ê°€ëŠ” NPC"),
+	Hold		UMETA(DisplayName = "Hold", ToolTip = "í”Œë ˆì´ì–´ë¥¼ ë“œëŠ” NPC"),
+	Blocking	UMETA(DisplayName = "Blocking", ToolTip = "í”Œë ˆì´ì–´ì˜ ê¸¸ì„ ë§‰ëŠ” NPC")
 };
 
-/* NPC ½ÃÀÛ »óÅÂ*/
+/* NPC ì‹œì‘ ìƒíƒœ*/
 UENUM(BlueprintType)
 enum class ENPCStartState : uint8
 {
     Stay,
-    Patrol
+    Patrol,
+    /*í™ˆ ìœ„ì¹˜ë¡œ ë³µê·€*/
+    Home
 };
 
-/*NPC Çàµ¿ ÈÄ Á¤Ã¥*/
+/* NPC ì •ì°° í˜•íƒœ */
+UENUM(BlueprintType)
+enum class ENPCPatrolType : uint8
+{
+    /* NPC í˜„ì¬ ìœ„ì¹˜ë¥¼ ê¸°ì¤€ìœ¼ë¡œ ì§€ì • ë°˜ê²½ ì•ˆì—ì„œ ì •ì°° */
+    RandomRadius UMETA(DisplayName = "ê·¼ì²˜ ë°˜ê²½"),
+    /* ì§€ì •í•œ ìŠ¤í”Œë¼ì¸ì˜ ì„ì˜ ì§€ì  ì£¼ë³€ì—ì„œ ì •ì°° */
+    Spline UMETA(DisplayName = "ìŠ¤í”Œë¼ì¸"),
+    /* ì§€ì •í•œ ì˜ì—­ ì•ˆì—ì„œë§Œ ì •ì°° */
+    Area UMETA(DisplayName = "ì˜ì—­")
+};
+
+/*NPC í–‰ë™ í›„ ì •ì±…*/
 UENUM(BlueprintType)
 enum class ENPCAfterActionPolicy : uint8
 {
-    /*Å¸±êÀÌ °è¼Ó º¸ÀÌ¸é ´Ù½Ã ÃßÀû/°ø°İ ¹İº¹*/
+    /*íƒ€ê¹ƒì´ ê³„ì† ë³´ì´ë©´ ë‹¤ì‹œ ì¶”ì /ê³µê²© ë°˜ë³µ*/
     RepeatWhileTargetVisible,
-    /*Çàµ¿ ÈÄ Á¤Áö*/
+    /*í–‰ë™ í›„ ì •ì§€*/
     OneShotThenStay,
-    /*Çàµ¿ ÈÄ ÃßÀû*/
-    OneShotThenTracking,
-    /*Çàµ¿ ÈÄ Á¤Âû*/
+    /*ê¸°ì¡´ ì—ì…‹ ì§ë ¬í™” í˜¸í™˜ìš©. ìƒˆ ì—ì…‹ì—ì„œëŠ” ì‚¬ìš©í•˜ì§€ ì•ŠìŒ*/
+    OneShotThenTracking UMETA(Hidden, Deprecated, DeprecationMessage = "OneShot Trackingì€ RepeatWhileTargetVisibleì„ ì‚¬ìš©í•˜ì„¸ìš”."),
+    /*í–‰ë™ í›„ ì •ì°°*/
     OneShotThenPatrol
 };
 
-/*NPC Å¸°ÙÀ» ÀÒ¾úÀ» ¶§ Á¤Ã¥*/
+/*NPC íƒ€ê²Ÿì„ ìƒì—ˆì„ ë•Œ ì •ì±…*/
 UENUM(BlueprintType)
 enum class ENPCLostTargetPolicy : uint8
 {
-    /*Çàµ¿ ÈÄ ´ë±â*/
+    /*í–‰ë™ í›„ ëŒ€ê¸°*/
     ReturnToStay,
-    /*Çàµ¿ ÈÄ Á¤Âû*/
+    /*í–‰ë™ í›„ ì •ì°°*/
     ReturnToPatrol,
-    /*Çàµ¿ ÈÄ ¿ø·¡ À§Ä¡·Î*/
+    /*í–‰ë™ í›„ ì›ë˜ ìœ„ì¹˜ë¡œ*/
     ReturnHome
 };

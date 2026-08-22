@@ -6,13 +6,14 @@
 #include "GameFramework/Controller.h"
 #include "GameplayTagContainer.h"
 #include "TimerManager.h"
+#include "AbilitySystemBlueprintLibrary.h" // SendGameplayEventToActor
 #include "DrawDebugHelpers.h" // [DEBUG-TASER] 확인용 임시
 
 ATaserGun::ATaserGun()
 {
-	// 테이저건은 최대 3회 사용 (요청 사양)
-	MaxUseCount = 3;
-	CurrentUseCount = MaxUseCount;
+	// 최대 내구도 100, 발사당 25 차감(GetDurabilityCostPerUse) → 4회 발사 가능.
+	MaxDurability = 100.0f;
+	CurrentDurability = MaxDurability;
 
 	// 총구 지점 컴포넌트 (VFX 시작 위치용). BP에서 메시 총구로 이동시킴
 	MuzzlePoint = CreateDefaultSubobject<USceneComponent>(TEXT("MuzzlePoint"));
@@ -65,7 +66,7 @@ void ATaserGun::Fire()
 	MulticastPlayFireEffect(FxStart, FxEnd, bHit);
 }
 
-// [TASER-006] 무기 공통 히트 처리 override: 맞은 캐릭터에 기절 태그 부여 + 타이머로 해제 예약
+// [TASER-006] 무기 공통 히트 처리 override: 맞은 캐릭터에 감전 태그 부여 + 타이머로 해제 예약
 void ATaserGun::ApplyWeaponHit_Implementation(AActor* HitActor, const FHitResult& Hit)
 {
 	ACharacterBase* TargetCharacter = Cast<ACharacterBase>(HitActor);
@@ -84,38 +85,31 @@ void ATaserGun::ApplyWeaponHit_Implementation(AActor* HitActor, const FHitResult
 		return;
 	}
 
-	static const FGameplayTag StunTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
-	if (!StunTag.IsValid())
+	// 감전 발동 이벤트 태그 (GA_CC_Electric의 Trigger. 철자 'Eletric' 그대로여야 매칭됨)
+	// 이 이벤트를 받으면 대상 ASC에 Grant된 GA_CC_Electric이 발동되어
+	// GE 적용 + 감전 몽타주 재생 + 지속시간 후 자동 해제까지 모두 처리한다.
+	static const FGameplayTag ElectricEventTag = FGameplayTag::RequestGameplayTag(FName("Event.Reaction.Eletric"), false);
+	if (!ElectricEventTag.IsValid())
 	{
-		// [DEBUG-TASER] State.Stunned 태그가 프로젝트에 정의 안 됨 - 확인 후 제거
-		UE_LOG(LogTemp, Warning, TEXT("[TASER] StunTag 'State.Stunned' is INVALID (not registered)"));
+		// [DEBUG-TASER] Event.Reaction.Eletric 태그가 프로젝트에 정의 안 됨 - 확인 후 제거
+		UE_LOG(LogTemp, Warning, TEXT("[TASER] EventTag 'Event.Reaction.Eletric' is INVALID (not registered)"));
 		return;
 	}
 
-	// 기절 부여 (StatusComponent가 GAS Loose Tag까지 처리 + 복제)
-	StatusComp->AddStatusTag(StunTag);
+	// 감전 GA 발동 (지속시간/해제/애니는 GA가 담당. 던진 주체를 Instigator로 전달)
+	FGameplayEventData EventData;
+	EventData.EventTag = ElectricEventTag;
+	EventData.Instigator = LastOwner;       // 발사한 플레이어
+	EventData.Target = TargetCharacter;     // 감전당하는 대상
+	UAbilitySystemBlueprintLibrary::SendGameplayEventToActor(TargetCharacter, ElectricEventTag, EventData);
 
-	// [DEBUG-TASER] 기절 부여 성공 로그 + 화면 메시지 - 확인 후 제거
-	UE_LOG(LogTemp, Warning, TEXT("[TASER] STUN applied to %s for %.1fs"), *GetNameSafe(TargetCharacter), StunDuration);
+	// [DEBUG-TASER] 이벤트 전송 로그 + 화면 메시지 - 확인 후 제거
+	UE_LOG(LogTemp, Warning, TEXT("[TASER] ELECTRIC event sent to %s"), *GetNameSafe(TargetCharacter));
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, StunDuration, FColor::Cyan,
-			FString::Printf(TEXT("STUN! %s (%.1fs)"), *GetNameSafe(TargetCharacter), StunDuration));
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan,
+			FString::Printf(TEXT("ELECTRIC event -> %s"), *GetNameSafe(TargetCharacter)));
 	}
-
-	// StunDuration 후 기절 해제 예약 (대상 캐릭터 기준 타이머)
-	FTimerHandle StunTimerHandle;
-	TWeakObjectPtr<UStatusComponent> WeakStatus = StatusComp;
-	FTimerDelegate ClearDelegate = FTimerDelegate::CreateLambda([WeakStatus]()
-	{
-		static const FGameplayTag ClearStunTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
-		if (WeakStatus.IsValid() && ClearStunTag.IsValid())
-		{
-			WeakStatus->RemoveStatusTag(ClearStunTag);
-		}
-	});
-
-	TargetCharacter->GetWorldTimerManager().SetTimer(StunTimerHandle, ClearDelegate, StunDuration, false);
 }
 
 // [TASER-005] 발사 이펙트 훅 - 모든 클라이언트에서 BP VFX 이벤트 재생

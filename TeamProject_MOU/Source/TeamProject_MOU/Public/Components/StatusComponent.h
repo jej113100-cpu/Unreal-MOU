@@ -2,15 +2,22 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "GameplayAbilitySpecHandle.h"
 #include "GameplayTagContainer.h"
+#include "StatusEffect/StatusEffectDataAsset.h"
 #include "StatusComponent.generated.h"
 
 class UAbilitySystemComponent;
+class UStatusEffectAbilitySetDataAsset;
 
-// 상태 태그 변경 시 호출되는 델리게이트 (팀원의 UI 및 NPC AI에서 구독 가능)
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStatusTagChanged, FGameplayTag, Tag, bool, bAdded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCrowdControlChanged, bool, bIsCrowdControlled);
 
-UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+/*
+ * GAS 기반 상태이상 컴포넌트입니다.
+ * 상태 태그의 실제 보관과 복제는 AbilitySystemComponent가 담당하고,
+ * 이 컴포넌트는 상태이상 GA 자동 지급과 공통 상태 조회를 제공합니다.
+ */
+UCLASS(ClassGroup = (StatusEffect), meta = (BlueprintSpawnableComponent))
 class TEAMPROJECT_MOU_API UStatusComponent : public UActorComponent
 {
 	GENERATED_BODY()
@@ -18,64 +25,91 @@ class TEAMPROJECT_MOU_API UStatusComponent : public UActorComponent
 public:
 	UStatusComponent();
 
-protected:
-	virtual void BeginPlay() override;
+	/* 이동 불가 CC 상태가 시작되거나 완전히 종료됐을 때 한 번 호출됩니다. */
+	UPROPERTY(BlueprintAssignable, Category = "Status Effect|Crowd Control")
+	FOnCrowdControlChanged OnCrowdControlChanged;
 
-public:
-	// ---------------------------------------------------------
-	// [상태 태그 조작 함수] - 플레이어 및 NPC 공통 사용
-	// ---------------------------------------------------------
+	/* 데이터 에셋에 등록된 상태이상 GA를 Owner ASC에 중복 없이 지급합니다. */
+	UFUNCTION(BlueprintCallable, Category = "Status Effect")
+	void GrantStatusEffectAbilities();
 
-	// 특정 상태 태그 추가 (예: State.Stunned, State.Held, State.Slowed 등)
-	UFUNCTION(BlueprintCallable, Category = "Status")
-	void AddStatusTag(FGameplayTag Tag);
-
-	// 특정 상태 태그 제거
-	UFUNCTION(BlueprintCallable, Category = "Status")
-	void RemoveStatusTag(FGameplayTag Tag);
-
-	// 특정 상태 태그를 가지고 있는지 확인
-	UFUNCTION(BlueprintCallable, Category = "Status")
+	/* ASC가 현재 해당 상태 태그를 보유하고 있는지 확인합니다. */
+	UFUNCTION(BlueprintPure, Category = "Status Effect")
 	bool HasStatusTag(FGameplayTag Tag) const;
 
-	// 현재 부여된 모든 상태 태그 반환
-	UFUNCTION(BlueprintCallable, Category = "Status")
-	FGameplayTagContainer GetActiveStatusTags() const { return ActiveStatusTags; }
+	/* 현재 ASC가 가진 모든 명시적 Gameplay Tag를 반환합니다. */
+	UFUNCTION(BlueprintPure, Category = "Status Effect")
+	FGameplayTagContainer GetActiveStatusTags() const;
 
-	// ---------------------------------------------------------
-	// [행동 가능 여부 판단 함수] - AI 및 컨트롤러에서 상태 체크용
-	// ---------------------------------------------------------
+	/* 기존 코드 호환용입니다. 새 상태이상은 GA/GE에서 태그를 부여하는 방식을 사용하세요. */
+	UFUNCTION(BlueprintCallable, Category = "Status Effect", meta = (DeprecatedFunction, DeprecationMessage = "상태이상 태그는 GA/GE에서 부여하세요."))
+	void AddStatusTag(FGameplayTag Tag);
 
-	// 이동 가능 상태인지 확인 (기절, 잡힘, 넉백 상태가 아닐 때 true)
-	UFUNCTION(BlueprintCallable, Category = "Status")
+	/* 기존 코드 호환용입니다. 새 상태이상은 GA/GE에서 태그를 제거하는 방식을 사용하세요. */
+	UFUNCTION(BlueprintCallable, Category = "Status Effect", meta = (DeprecatedFunction, DeprecationMessage = "상태이상 태그는 GA/GE에서 제거하세요."))
+	void RemoveStatusTag(FGameplayTag Tag);
+
+	UFUNCTION(BlueprintPure, Category = "Status Effect|State")
 	bool CanMove() const;
 
-	// 행동(공격, 상호작용, 아이템 사용 등) 가능 상태인지 확인
-	UFUNCTION(BlueprintCallable, Category = "Status")
+	UFUNCTION(BlueprintPure, Category = "Status Effect|State")
 	bool CanAct() const;
 
-	// 달리기 가능 상태인지 확인
-	UFUNCTION(BlueprintCallable, Category = "Status")
+	UFUNCTION(BlueprintPure, Category = "Status Effect|State")
 	bool CanSprint() const;
 
-	// 물품 운반/잡기 가능 상태인지 확인 (팔 손상 시 한계 적용)
-	UFUNCTION(BlueprintCallable, Category = "Status")
+	UFUNCTION(BlueprintPure, Category = "Status Effect|State")
 	bool CanCarry() const;
 
-public:
-	// 상태 태그 변경 알림 델리게이트 (NPC AI StateTree 및 플레이어 UI 연동용)
-	UPROPERTY(BlueprintAssignable, Category = "Status|Events")
-	FOnStatusTagChanged OnStatusTagChanged;
+	UFUNCTION(BlueprintPure, Category = "Status Effect")
+	UAbilitySystemComponent* GetOwnerAbilitySystemComponent() const { return AbilitySystemComponent; }
+
+	/* 유닛의 Ability Set에서 요청한 종류의 상태이상 설정을 찾습니다. */
+	UFUNCTION(BlueprintPure, Category = "Status Effect")
+	UStatusEffectDataAsset* GetStatusEffectData(EStatusEffectType EffectType) const;
+
+	/* 현재 적용 중인 이동 불가 CC 태그의 총 스택 수를 반환합니다. */
+	UFUNCTION(BlueprintPure, Category = "Status Effect|Crowd Control")
+	int32 GetMovementBlockingCCTagCount() const;
 
 protected:
-	// 현재 캐릭터에게 적용된 상태 태그 컨테이너
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_ActiveStatusTags, Category = "Status")
-	FGameplayTagContainer ActiveStatusTags;
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	UFUNCTION()
-	void OnRep_ActiveStatusTags(const FGameplayTagContainer& OldTags);
+	/* Owner에게 자동 지급할 상태이상 GA 목록 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Status Effect")
+	TObjectPtr<UStatusEffectAbilitySetDataAsset> AbilitySetData;
 
-	// 소유자 Actor의 AbilitySystemComponent 참조
-	UPROPERTY()
+	/* Owner가 가진 AbilitySystemComponent 캐시 */
+	UPROPERTY(Transient)
 	TObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
+
+	/* 이 컴포넌트가 새로 지급한 Ability의 핸들 */
+	UPROPERTY(Transient)
+	TArray<FGameplayAbilitySpecHandle> GrantedAbilityHandles;
+
+	/* 이 중 하나라도 ASC에 존재하면 AI Blackboard의 CC 상태를 활성화합니다. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Status Effect|Crowd Control", meta = (Categories = "State"))
+	FGameplayTagContainer MovementBlockingCCTags;
+
+	/* BT에서 이동 불가 CC 여부를 확인할 Blackboard Bool 키 이름 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Status Effect|Crowd Control")
+	FName CrowdControlledBlackboardKey = TEXT("IsCrowdControlled");
+
+	/* 이동 불가 CC가 처음 적용될 때 진행 중인 AI 이동을 즉시 중단할지 여부 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Status Effect|Crowd Control")
+	bool bStopAIMovementWhenCrowdControlled = true;
+
+	/* 이동 불가 CC가 처음 적용될 때 취소할 실행 중 Ability의 태그 목록입니다. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Status Effect|Crowd Control", meta = (Categories = "Ability"))
+	FGameplayTagContainer AbilityTagsToCancelOnMovementBlockingCC;
+
+private:
+	UAbilitySystemComponent* FindOwnerAbilitySystemComponent() const;
+	void BindMovementBlockingCCTagEvents();
+	void HandleMovementBlockingCCTagChanged(FGameplayTag ChangedTag, int32 NewCount);
+	void RefreshCrowdControlledBlackboard();
+	void CancelAbilitiesBlockedByCrowdControl();
+
+	bool bWasMovementBlockedByCC = false;
 };

@@ -55,9 +55,8 @@ void ATeamProject_MOUCharacter::SetupPlayerInputComponent(UInputComponent* Playe
 	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent)) {
 		
-		// Jumping
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
+		// [주의] JumpAction 바인딩은 하위 클래스(MainCharacter)에서 CanMove() 체크와 함께 처리함.
+		// 여기서 ACharacter::Jump를 직접 바인딩하면 그로기/사망 상태에서도 점프가 실행되므로 제거.
 
 		// Moving
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ATeamProject_MOUCharacter::Move);

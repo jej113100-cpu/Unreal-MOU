@@ -1,0 +1,9 @@
+build/
+build_test/
+out/
+.vs/
+*.exe
+*.obj
+*.ilk
+*.pdb
+*.log

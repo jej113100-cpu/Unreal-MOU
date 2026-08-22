@@ -71,4 +71,13 @@ protected:
 	// 캐릭터가 잡힌(Held) 상태인지 여부
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Status")
 	bool bIsHeld = false;
+
+	// [Heavy 전용] 무거운 택배를 혼자 들고 있는 상태 (= 드래그 애니메이션)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|State")
+	bool bIsHeavySingleCarry = false;
+
+	// [Heavy 전용] 내가 두 번째 운반자인지 여부 (= IK로 뒤쪽 잘는 사람)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|State")
+	bool bIsSecondCarrier = false;
+
 };

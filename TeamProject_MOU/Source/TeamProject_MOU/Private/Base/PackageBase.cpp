@@ -4,12 +4,16 @@
 #include "AbilitySystemComponent.h"
 #include "Components/CarryingComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Player/MainCharacter.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Ability/GA_CoopCarry.h"
 
 APackageBase::APackageBase()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	bCanBeStoredInInventory = false;
 
 	// 운반을 위한 전방/후방 손잡이 생성 (일반/무거운 물품 공통 기반)
 	Handle_Front = CreateDefaultSubobject<USceneComponent>(TEXT("Handle_Front"));
@@ -48,21 +52,28 @@ void APackageBase::Tick(float DeltaTime)
 		CurrentSpoilTime -= DeltaTime;
 		if (CurrentSpoilTime <= 0.0f)
 		{
-			BaseValue = FMath::Max(0, BaseValue / 2);
+			// 시간 만료: 가치는 GetCurrentValue()에서 동적으로 0 처리되므로
+			// 여기서 BaseValue를 강제로 깎을 필요 없음. (단, UI 갱신을 위해 파손 연출이나 OnRep 활용 가능)
 		}
 	}
 
 	// 서버에서만 운반 로직 수행
 	if (HasAuthority())
 	{
+		// [전환 유예 타이머] 매 프레임 감산
+		if (TransitionGracePeriod > 0.0f)
+		{
+			TransitionGracePeriod = FMath::Max(0.0f, TransitionGracePeriod - DeltaTime);
+		}
+
 		// [Heavy 전용] 운반 중 패키지 위치/회전 업데이트
 		if (PackageType == EPackageType::Heavy && CurrentCarriers.Num() > 0)
 		{
 			UpdateHeavyPackagePosition(DeltaTime);
 		}
 
-		// [협동 이탈 검사] 운반자들이 택배에서 너무 멀어지면 강제로 놓게 만듦
-		if (CurrentCarriers.Num() > 0)
+		// [협동 이탈 검사] 전환 유예 중에는 검사 스킵 (강제 드랍 연쇄 방지)
+		if (CurrentCarriers.Num() > 0 && TransitionGracePeriod <= 0.0f)
 		{
 			TArray<AActor*> CarriersToDrop;
 			for (AActor* Carrier : CurrentCarriers)
@@ -83,7 +94,7 @@ void APackageBase::Tick(float DeltaTime)
 				{
 					RemoveCarrier(Carrier);
 				}
-				UE_LOG(LogTemp, Warning, TEXT("[%s] 운반자가 너무 멀어져 택배를 놓쳤습니다!"), *Carrier->GetName());
+				UE_LOG(LogTemp, Warning, TEXT("[%s] 운반자가 너무 멀어져 택배를 놓쳓습니다!"), *Carrier->GetName());
 			}
 		}
 
@@ -124,15 +135,32 @@ void APackageBase::UpdateHeavyPackagePosition(float DeltaTime)
 
 	if (CurrentCarriers.Num() == 1)
 	{
-		// [1인 운반] 캐릭터 전방 방향 + 뒷끝 20도 기울기 (바닥에 끌리는 느낌)
-		FRotator DragRot = FrontCarrier->GetActorRotation();
-		DragRot.Pitch = -20.0f; // 한쪽 끝이 바닥으로 처지는 효과
+		// [1인 드래그 운반] DragSocket(등/어깨) 기준으로 패키지 부착
+		FVector DragPos;
+		if (FrontChar->GetMesh()->DoesSocketExist(DragSocketName))
+		{
+			DragPos = FrontChar->GetMesh()->GetSocketLocation(DragSocketName);
+		}
+		else
+		{
+			// DragSocket 없으면 캐릭터 뒤쪽 어깨 높이 위치로 폴백
+			DragPos = FrontCarrier->GetActorLocation()
+				- FrontCarrier->GetActorForwardVector() * 30.0f  // 뒤쪽
+				+ FVector(0, 0, 80.0f);  // 어깨 높이
+		}
 
-		// 핵심: 패키지가 회전된 상태에서 Handle_Front의 월드 위치 = 손 위치가 되도록
-		// PackageOrigin = FrontHandPos - Rotate(HFLocal)
+		// [오프셋 제거] 아까 추가했던 좌우 보정(SideOffset)이 오히려 중앙 정렬을 방해했으므로 완전히 제거합니다.
+		// DragPos는 캐릭터의 소켓 위치를 그대로 사용합니다.
+
+		// 핵심 수정: 택배가 캐릭터 뒤쪽으로 뻗도록 Yaw를 180도 뒤집습니다. (그림 2 방향 복구)
+		FRotator DragRot = FrontCarrier->GetActorRotation();
+		DragRot.Yaw += 180.0f;  // 캐릭터 등 뒤로 끌리도록 회전 복구!
+		DragRot.Pitch = -20.0f; // 손잡이(앞)는 캐릭터에, 꼬리(뒤)는 바닥으로 처지는 각도
+
+		// DragSocket 위치에서 Handle_Front 오프셋만큼 역방향으로 밀어 패키지 원점 계산
 		FQuat PackageQuat = DragRot.Quaternion();
 		FVector RotatedHF = PackageQuat.RotateVector(HFLocal);
-		FVector NewPackageLoc = FrontHandPos - RotatedHF;
+		FVector NewPackageLoc = DragPos - RotatedHF;
 
 		SetActorLocationAndRotation(NewPackageLoc, DragRot, false, nullptr, ETeleportType::None);
 	}
@@ -161,12 +189,18 @@ void APackageBase::UpdateHeavyPackagePosition(float DeltaTime)
 		FVector Dir = BackHandPos - FrontHandPos;
 		if (Dir.IsNearlyZero()) return;
 
-		FRotator PackageRot = Dir.Rotation();
-		FQuat PackageQuat = PackageRot.Quaternion();
+		// 핸들 간의 로컬 방향 벡터 (Front -> Back)
+		FVector HBLocal = Handle_Back ? Handle_Back->GetRelativeLocation() : FVector(-100, 0, 0);
+		// HFLocal은 이미 함수 상단에 선언되었으므로 재선언하지 않고 사용하거나, 
+		// 상단의 값과 동일하므로 그대로 유지하면서 지역변수 재선언을 방지합니다.
+		FVector LocalDir = HBLocal - HFLocal;
+		if (LocalDir.IsNearlyZero()) LocalDir = FVector(-1, 0, 0); // 폴백
 
-		// 핵심: Handle_Front 월드 위치 = FrontHandPos 가 되도록 패키지 원점 계산
-		// PackageOrigin + Rotate(HFLocal) = FrontHandPos
-		// → PackageOrigin = FrontHandPos - Rotate(HFLocal)
+		// 핵심: 택배의 로컬 Handle방향(LocalDir)이 월드의 손 방향(Dir)과 일치하도록 회전값 계산!
+		FQuat PackageQuat = FQuat::FindBetweenVectors(LocalDir, Dir);
+		FRotator PackageRot = PackageQuat.Rotator();
+
+		// Handle_Front 월드 위치 = FrontHandPos 가 되도록 패키지 원점 계산
 		FVector RotatedHF = PackageQuat.RotateVector(HFLocal);
 		FVector NewPackageOrigin = FrontHandPos - RotatedHF;
 
@@ -196,11 +230,47 @@ void APackageBase::OnRep_bIsBroken()
 	}
 }
 
+void APackageBase::OnUse_Implementation()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[%s] 택배는 사용할 수 없습니다! (옮기기만 가능)"), *GetName());
+}
+
+bool APackageBase::CanInteract_Implementation(AActor* Interactor) const
+{
+	// 택배는 F키 상호작용 대상이 아니며, 오직 E키로만 잡고/들고/던집니다.
+	return false;
+}
+
+void APackageBase::MulticastPickUp_Implementation(AActor* Picker)
+{
+	Super::MulticastPickUp_Implementation(Picker);
+
+	// 무거운 택배는 서버와 모든 클라이언트에서 상호작용은 유지하되 물리 및 캐릭터 충돌을 끕니다. (동기화 불일치/떨림 방지)
+	if (PackageType == EPackageType::Heavy)
+	{
+		MeshComponent->SetSimulatePhysics(false);
+		MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		MeshComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	}
+}
+
+void APackageBase::MulticastDrop_Implementation(FVector DropLocation, AActor* Dropper)
+{
+	Super::MulticastDrop_Implementation(DropLocation, Dropper);
+
+	// 내려놓을 때는 서버와 모든 클라이언트에서 충돌을 정상 복구합니다.
+	if (PackageType == EPackageType::Heavy)
+	{
+		MeshComponent->SetSimulatePhysics(true);
+		MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		MeshComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	}
+}
+
 void APackageBase::AddCarrier(AActor* Carrier)
 {
 	if (!Carrier || CurrentCarriers.Contains(Carrier)) return;
 
-	// [Heavy] 무거운 택배는 최대 2명까지만 운반 가능
 	if (PackageType == EPackageType::Heavy && CurrentCarriers.Num() >= 2)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[%s] 무거운 택배는 최대 2명까지 운반 가능합니다."), *GetName());
@@ -209,23 +279,47 @@ void APackageBase::AddCarrier(AActor* Carrier)
 
 	if (CurrentCarriers.Num() == 0)
 	{
-		// 첫 번째 운반자: 물리 비활성화, 충돌은 운반자에게만 무시 설정
-		MeshComponent->SetSimulatePhysics(false);
-		MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		// 운반자와 택배 충돌 상호 무시 (Carrier 돌보지 않도록)
-		MeshComponent->IgnoreActorWhenMoving(Carrier, true);
-		if (ACharacter* Char = Cast<ACharacter>(Carrier))
-		{
-			Char->GetCapsuleComponent()->IgnoreActorWhenMoving(this, true);
-		}
+		// 1인 픽업 시점의 물리 처리는 MulticastPickUp_Implementation에서 클라이언트 동기화와 함께 처리됩니다.
 	}
-	else
+	else if (CurrentCarriers.Num() == 1 && PackageType == EPackageType::Heavy)
 	{
-		// 두 번째 운반자 추가 시 충돌도 동일하게 무시
-		MeshComponent->IgnoreActorWhenMoving(Carrier, true);
-		if (ACharacter* Char = Cast<ACharacter>(Carrier))
+		AActor* FrontCarrier = CurrentCarriers[0];
+
+		// [수정] Handle_Back의 월드 위치는 패키지 Pitch(-20도) 기울기의 영향을 받아 하늘/땅으로 오차 발생.
+		// 따라서 현재 기울어진 Handle_Back 위치를 직접 사용하지 않고,
+		// 첫 번째 운반자(FrontCarrier) → 패키지 중심(XY) → 반대편 연장선 상에서 위치를 계산합니다.
+		const FVector PackageCenterXY = FVector(GetActorLocation().X, GetActorLocation().Y, 0.0f);
+		const FVector FrontXY = FVector(FrontCarrier->GetActorLocation().X, FrontCarrier->GetActorLocation().Y, 0.0f);
+
+		const FVector FrontToCenter = PackageCenterXY - FrontXY;
+		if (FrontToCenter.IsNearlyZero()) return;
+
+		// 첫 번째 운반자로부터 패키지 중심까지의 거리만큼 반대편으로 연장 + 캐릭터 서있을 여유거리
+		const float HandleDist = FrontToCenter.Size();
+		const FVector OppositeDir = FrontToCenter.GetSafeNormal();
+		constexpr float StandOffDistance = 60.0f;
+
+		// 최종 텔레포트 위치: XY는 반대편 연장선, Z는 첫 번째 운반자와 동일한 높이 유지
+		FVector FinalLocation;
+		FinalLocation.X = PackageCenterXY.X + OppositeDir.X * (HandleDist + StandOffDistance);
+		FinalLocation.Y = PackageCenterXY.Y + OppositeDir.Y * (HandleDist + StandOffDistance);
+		FinalLocation.Z = FrontCarrier->GetActorLocation().Z;
+
+		// 첫 번째 운반자를 바라보는 방향으로 Yaw 회전
+		FVector DirToFront = FrontCarrier->GetActorLocation() - FinalLocation;
+		DirToFront.Z = 0.0f;
+		const FRotator FaceRotation = DirToFront.IsNearlyZero()
+			? Carrier->GetActorRotation()
+			: DirToFront.Rotation();
+
+		Carrier->SetActorLocationAndRotation(FinalLocation, FaceRotation, false, nullptr, ETeleportType::TeleportPhysics);
+
+		// 첫 번째 운반자도 즉시 2번째 운반자 방향을 바라보게 회전
+		FVector DirToBack = FinalLocation - FrontCarrier->GetActorLocation();
+		DirToBack.Z = 0.0f;
+		if (!DirToBack.IsNearlyZero())
 		{
-			Char->GetCapsuleComponent()->IgnoreActorWhenMoving(this, true);
+			FrontCarrier->SetActorRotation(DirToBack.Rotation());
 		}
 	}
 
@@ -250,24 +344,48 @@ void APackageBase::RemoveCarrier(AActor* Carrier)
 		AppliedWeightMap.Remove(Carrier);
 	}
 
-	// 충돌 무시 해제
-	MeshComponent->IgnoreActorWhenMoving(Carrier, false);
-	if (ACharacter* Char = Cast<ACharacter>(Carrier))
-	{
-		Char->GetCapsuleComponent()->IgnoreActorWhenMoving(this, false);
-	}
+	// 기존 개별 무시(IgnoreActorWhenMoving) 해제 로직은 제거 (이제 채널 단위 무시를 사용하므로)
 
 	CurrentCarriers.Remove(Carrier);
 	UpdateCarriersSpeedModifier();
 
-	// 아무도 들고 있지 않게 되면 물리 재활성
+	// [2→1 전환] 다음 Tick 이전에 즉시 1인 드래그 위치로 선점 배치 (떨림 방지)
+	// UpdateHeavyPackagePosition()의 1인 로직과 동일한 계산을 RemoveCarrier 시점에 미리 수행합니다.
+	if (CurrentCarriers.Num() == 1 && PackageType == EPackageType::Heavy)
+	{
+		// [제안 B] 0.2초 유예 기간 설정: 전환 직후 이탈 검사 스킵 (강제 드랍 연쇄 방지)
+		TransitionGracePeriod = 0.2f;
+
+		AActor* RemainingCarrier = CurrentCarriers[0];
+		if (ACharacter* RemainingChar = Cast<ACharacter>(RemainingCarrier))
+		{
+			FVector DragPos;
+			if (RemainingChar->GetMesh()->DoesSocketExist(DragSocketName))
+			{
+				DragPos = RemainingChar->GetMesh()->GetSocketLocation(DragSocketName);
+			}
+			else
+			{
+				DragPos = RemainingCarrier->GetActorLocation()
+					- RemainingCarrier->GetActorForwardVector() * 30.0f
+					+ FVector(0, 0, 80.0f);
+			}
+
+			FRotator DragRot = RemainingCarrier->GetActorRotation();
+			DragRot.Yaw += 180.0f;
+			DragRot.Pitch = -20.0f;
+
+			const FVector HFLocal = Handle_Front ? Handle_Front->GetRelativeLocation() : FVector::ZeroVector;
+			const FVector NewPackageLoc = DragPos - DragRot.Quaternion().RotateVector(HFLocal);
+
+			SetActorLocationAndRotation(NewPackageLoc, DragRot, false, nullptr, ETeleportType::TeleportPhysics);
+		}
+	}
+
+	// 아무도 들고 있지 않게 되면 물리 및 충돌 재활성 (클라이언트 동기화를 위해 MulticastDrop이 담당함)
 	if (CurrentCarriers.Num() == 0)
 	{
-		// Attach 해제 후 물리 재활성
 		DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
-		MeshComponent->SetSimulatePhysics(true);
-		MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		MeshComponent->ClearMoveIgnoreActors();
 	}
 }
 
@@ -278,18 +396,15 @@ void APackageBase::UpdateCarriersSpeedModifier()
 		return;
 	}
 
-	float TotalLiftPower = 0.0f;
 	float WeightPerCarrier = CurrentCarriers.Num() > 0 ? (ItemWeight / CurrentCarriers.Num()) : 0.0f;
 
-	// 참여한 모든 플레이어의 LiftPower 합산 및 무게 재분배
+	// 참여한 모든 플레이어에게 무게 균등 분배
 	for (AActor* Carrier : CurrentCarriers)
 	{
 		if (ACharacterBase* BaseChar = Cast<ACharacterBase>(Carrier))
 		{
 			if (UBaseAttributeSet* AttrSet = BaseChar->BaseAttribute)
 			{
-				TotalLiftPower += AttrSet->GetLiftPower();
-				
 				// 기존에 분배된 무게가 있다면 일단 차감 (재분배를 위함)
 				if (AppliedWeightMap.Contains(Carrier))
 				{
@@ -303,31 +418,39 @@ void APackageBase::UpdateCarriersSpeedModifier()
 		}
 	}
 
-	if (CurrentCarriers.Num() > 0)
-	{
-		// (총 드는 힘 / 택배 무게) 비율 계산 (최대 1.0 = 정상 속도)
-		CurrentSpeedRatio = FMath::Clamp(TotalLiftPower / ItemWeight, 0.1f, 1.0f);
-
-		// TODO: 계산된 SpeedRatio를 각 Carrier에게 GameplayEffect(Modifier)로 적용하여 속도 저하
-		UE_LOG(LogTemp, Log, TEXT("택배 운반 인원: %d명, 총 힘: %f, 인당 분배 무게: %f -> 속도 배율: %f"), 
-			CurrentCarriers.Num(), TotalLiftPower, WeightPerCarrier, CurrentSpeedRatio);
-	}
-	else
-	{
-		CurrentSpeedRatio = 1.0f;
-	}
+	CurrentSpeedRatio = 1.0f;
 }
 
 void APackageBase::OnPackageHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
 	// 캐릭터가 밟거나 가볍게 부딪히는 것은 무시 (물리적 낙하/충돌만 취급)
-	if (bIsBroken || OtherActor == this || Cast<ACharacterBase>(OtherActor))
+	if (bIsBroken || OtherActor == this)
 	{
 		return;
 	}
 
 	// 충돌 순간의 물리 속도(충격량)를 구함
 	float ImpactSpeed = HitComponent->GetComponentVelocity().Size();
+
+	// 플레이어(MainCharacter)와 부딪혔을 경우 넉다운 처리 검사
+	if (AMainCharacter* HitPlayer = Cast<AMainCharacter>(OtherActor))
+	{
+		// 임팩트 속도가 설정된 넉다운 기준치 이상일 때만 기절(Knockdown) 처리
+		if (ImpactSpeed >= KnockdownThresholdSpeed)
+		{
+			HitPlayer->Knockdown();
+			UE_LOG(LogTemp, Warning, TEXT("[%s] 플레이어를 세게 타격하여 기절시켰습니다! 속도: %f"), *GetName(), ImpactSpeed);
+		}
+		
+		// 플레이어와의 충돌에서는 패키지 자체의 내구도 감소는 진행하지 않음(기획에 따라 변경 가능)
+		return;
+	}
+
+	// 일반 ACharacterBase와의 충돌 무시 (위에서 MainCharacter를 걸러냈으므로 남은 건 NPC 등)
+	if (Cast<ACharacterBase>(OtherActor))
+	{
+		return;
+	}
 
 	// 500 이상의 속도로 부딪혔을 때만 대미지 처리 (살짝 내려놓는 것은 100~300 내외)
 	if (ImpactSpeed > 500.0f)
@@ -358,20 +481,44 @@ void APackageBase::DamagePackage(float DamageAmount)
 
 	CurrentDurability -= DamageAmount;
 	
+	// 서버 자신(로컬)의 UI도 즉시 갱신되도록 수동으로 OnRep 호출
+	OnRep_CurrentDurability();
+	
 	// 파손 처리
 	if (CurrentDurability <= 0.0f)
 	{
 		CurrentDurability = 0.0f;
 		bIsBroken = true;  // [Replicated] 이 값이 바뀌면 클라이언트의 OnRep_bIsBroken이 자동 호출됨
 		
-		// 찌그러진 상태로 남되, 택배의 가치를 0원으로 하락시킴
-		BaseValue = 0;
-		
 		UE_LOG(LogTemp, Error, TEXT("[%s] 택배 파손! 가치가 0원이 되었습니다."), *GetName());
 		
 		// 서버 자신도 연출 실행 (OnRep은 서버에서는 호출 안 되므로 직접 호출)
 		OnPackageBroken();
 	}
+}
+
+int32 APackageBase::GetCurrentValue() const
+{
+	// 1. 상하기 쉬운 음식이고, 유통기한이 다 지났다면 가치 0원
+	if (PackageType == EPackageType::Perishable && CurrentSpoilTime <= 0.0f)
+	{
+		return 0;
+	}
+
+	// 2. 파손된 경우 0원
+	if (bIsBroken || CurrentDurability <= 0.0f)
+	{
+		return 0;
+	}
+
+	// 3. 내구도 비례 가치 계산
+	if (MaxDurability > 0.0f)
+	{
+		float DurabilityRatio = FMath::Clamp(CurrentDurability / MaxDurability, 0.0f, 1.0f);
+		return FMath::RoundToInt(BaseValue * DurabilityRatio);
+	}
+
+	return BaseValue;
 }
 
 void APackageBase::MulticastOnPackageBroken_Implementation()
@@ -381,10 +528,7 @@ void APackageBase::MulticastOnPackageBroken_Implementation()
 	OnPackageBroken();
 }
 
-void APackageBase::OnUse_Implementation()
-{
-	// 택배는 사용이 불가능하므로 아무것도 하지 않음 (또는 안내 메시지 출력)
-}
+
 
 float APackageBase::GetPushResistance_Implementation() const
 {

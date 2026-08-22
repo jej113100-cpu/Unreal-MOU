@@ -45,15 +45,6 @@ public:
 	FGameplayAttributeData MaxStemina;
 	ATTRIBUTE_ACCESSORS_BASIC(UBaseAttributeSet, MaxStemina);
 
-	// 드는 힘 (물건을 운반하거나 밀 때 사용하는 힘)
-	UPROPERTY(BlueprintReadOnly, Category = "Attribute", ReplicatedUsing = OnRep_LiftPower)
-	FGameplayAttributeData LiftPower;
-	ATTRIBUTE_ACCESSORS_BASIC(UBaseAttributeSet, LiftPower);
-
-	UPROPERTY(BlueprintReadOnly, Category = "Attribute", ReplicatedUsing = OnRep_MaxLiftPower)
-	FGameplayAttributeData MaxLiftPower;
-	ATTRIBUTE_ACCESSORS_BASIC(UBaseAttributeSet, MaxLiftPower);
-
 	// 현재 들고 있는 무게 (과적 계산용)
 	UPROPERTY(BlueprintReadOnly, Category = "Attribute", ReplicatedUsing = OnRep_CurrentWeight)
 	FGameplayAttributeData CurrentWeight;
@@ -63,6 +54,16 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Attribute", ReplicatedUsing = OnRep_MaxWeight)
 	FGameplayAttributeData MaxWeight;
 	ATTRIBUTE_ACCESSORS_BASIC(UBaseAttributeSet, MaxWeight);
+
+	// 현재 배터리 (발광 손전등 소모용)
+	UPROPERTY(BlueprintReadOnly, Category = "Attribute", ReplicatedUsing = OnRep_Battery)
+	FGameplayAttributeData Battery;
+	ATTRIBUTE_ACCESSORS_BASIC(UBaseAttributeSet, Battery);
+
+	// 최대 배터리 용량
+	UPROPERTY(BlueprintReadOnly, Category = "Attribute", ReplicatedUsing = OnRep_MaxBattery)
+	FGameplayAttributeData MaxBattery;
+	ATTRIBUTE_ACCESSORS_BASIC(UBaseAttributeSet, MaxBattery);
 
 	UFUNCTION(BlueprintCallable, Category = "Attribute")
 	void ResetHealthToMax();
@@ -86,16 +87,16 @@ public:
 	void OnRep_MaxStemina(const FGameplayAttributeData& OldValue) const;
 
 	UFUNCTION()
-	void OnRep_LiftPower(const FGameplayAttributeData& OldValue) const;
-
-	UFUNCTION()
-	void OnRep_MaxLiftPower(const FGameplayAttributeData& OldValue) const;
-
-	UFUNCTION()
 	void OnRep_CurrentWeight(const FGameplayAttributeData& OldValue) const;
 
 	UFUNCTION()
 	void OnRep_MaxWeight(const FGameplayAttributeData& OldValue) const;
+
+	UFUNCTION()
+	void OnRep_Battery(const FGameplayAttributeData& OldValue) const;
+
+	UFUNCTION()
+	void OnRep_MaxBattery(const FGameplayAttributeData& OldValue) const;
 
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;

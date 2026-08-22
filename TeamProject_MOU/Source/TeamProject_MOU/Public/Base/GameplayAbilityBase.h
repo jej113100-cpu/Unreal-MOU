@@ -9,9 +9,20 @@
 /**
  * 
  */
+class ACharacterBase;
+class UBaseAttributeSet;
+
 UCLASS()
 class TEAMPROJECT_MOU_API UGameplayAbilityBase : public UGameplayAbility
 {
 	GENERATED_BODY()
-	
+
+public:
+	UGameplayAbilityBase();
+
+	UFUNCTION(BlueprintPure, Category = "Ability")
+	ACharacterBase* GetCharacterFromActorInfo() const;
+
+	UFUNCTION(BlueprintPure, Category = "Ability")
+	UBaseAttributeSet* GetBaseAttributeSet() const;
 };

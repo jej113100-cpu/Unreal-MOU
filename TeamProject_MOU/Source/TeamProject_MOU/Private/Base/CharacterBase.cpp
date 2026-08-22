@@ -3,10 +3,12 @@
 #include "Base/CharacterBase.h"
 
 #include "Base/BaseAttributeSet.h"
+#include "Components/GrabFollowComponent.h"
 #include "Components/StatusComponent.h"
 #include "Abilities/GameplayAbility.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Player/MainCharacter.h"
 
 ACharacterBase::ACharacterBase()
 {
@@ -20,8 +22,12 @@ ACharacterBase::ACharacterBase()
 	// 플레이어 및 방해 NPC 공통 상태 관리 컴포넌트 생성
 	StatusComponent = CreateDefaultSubobject<UStatusComponent>(TEXT("StatusComponent"));
 
+	// 잡힌 캐릭터의 위치 및 회전을 운반자 소켓에 동기화하는 컴포넌트 생성
+	GrabFollowComponent = CreateDefaultSubobject<UGrabFollowComponent>(TEXT("GrabFollowComponent"));
+
 	// 캡슐 콜리전 기본 크기 설정
 	GetCapsuleComponent()->InitCapsuleSize(35.0f, 90.0f);
+	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 
 	// 컨트롤러 회전 사용 안 함 (캐릭터 이동 방향으로 자동 회전)
 	bUseControllerRotationPitch = false;
@@ -34,7 +40,7 @@ ACharacterBase::ACharacterBase()
 	// 이동 물리 및 점프 관련 기본값 설정
 	GetCharacterMovement()->JumpZVelocity = 500.0f;
 	GetCharacterMovement()->AirControl = 0.35f;
-	GetCharacterMovement()->MaxWalkSpeed = 500.0f;
+	GetCharacterMovement()->MaxWalkSpeed = 300.0f;
 	GetCharacterMovement()->MinAnalogWalkSpeed = 20.0f;
 	GetCharacterMovement()->BrakingDecelerationWalking = 2000.0f;
 	GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
@@ -47,6 +53,14 @@ ACharacterBase::ACharacterBase()
 void ACharacterBase::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// ASC가 Character에 있으므로 서버와 모든 클라이언트에서 ActorInfo를 초기화합니다.
+	// AI NPC는 클라이언트에서 PlayerState가 없어 OnRep_PlayerState가 호출되지 않을 수 있습니다.
+	if (AbilitySystemComponent)
+	{
+		AbilitySystemComponent->InitAbilityActorInfo(this, this);
+		AbilitySystemComponent->SetReplicationMode(AscReplicationMode);
+	}
 
 	// Attribute 변경 감지 델리게이트 바인딩
 	BindAttributeChangeDelegates();
@@ -184,6 +198,21 @@ void ACharacterBase::BindAttributeChangeDelegates()
 	AbilitySystemComponent
 		->GetGameplayAttributeValueChangeDelegate(UBaseAttributeSet::GetMaxWeightAttribute())
 		.AddUObject(this, &ACharacterBase::HandleMaxWeightChanged);
+
+	// 배터리 변경 델리게이트 바인딩
+	AbilitySystemComponent
+		->GetGameplayAttributeValueChangeDelegate(UBaseAttributeSet::GetBatteryAttribute())
+		.AddUObject(this, &ACharacterBase::HandleBatteryChanged);
+
+	AbilitySystemComponent
+		->GetGameplayAttributeValueChangeDelegate(UBaseAttributeSet::GetMaxBatteryAttribute())
+		.AddUObject(this, &ACharacterBase::HandleMaxBatteryChanged);
+
+	// 초기 속도 값 동기화
+	if (GetCharacterMovement())
+	{
+		GetCharacterMovement()->MaxWalkSpeed = BaseAttribute->GetMoveSpeed();
+	}
 }
 
 void ACharacterBase::HandleHealthChanged(const FOnAttributeChangeData& Data)
@@ -254,13 +283,78 @@ void ACharacterBase::HandleMaxMoveSpeedChanged(const FOnAttributeChangeData& Dat
 void ACharacterBase::HandleCurrentWeightChanged(const FOnAttributeChangeData& Data)
 {
 	if (!BaseAttribute) return;
-	UpdateEncumbranceState(Data.NewValue, BaseAttribute->GetMaxWeight());
+	float MaxW = BaseAttribute->GetMaxWeight();
+	UpdateEncumbranceState(Data.NewValue, MaxW);
+	OnWeightUpdated(Data.NewValue, MaxW, MaxW > 0.0f ? (Data.NewValue / MaxW) : 0.0f);
 }
 
 void ACharacterBase::HandleMaxWeightChanged(const FOnAttributeChangeData& Data)
 {
 	if (!BaseAttribute) return;
-	UpdateEncumbranceState(BaseAttribute->GetCurrentWeight(), Data.NewValue);
+	float CurrW = BaseAttribute->GetCurrentWeight();
+	UpdateEncumbranceState(CurrW, Data.NewValue);
+	OnWeightUpdated(CurrW, Data.NewValue, Data.NewValue > 0.0f ? (CurrW / Data.NewValue) : 0.0f);
+}
+
+void ACharacterBase::HandleBatteryChanged(const FOnAttributeChangeData& Data)
+{
+	if (!BaseAttribute) return;
+	float MaxBat = BaseAttribute->GetMaxBattery();
+	OnBatteryUpdated(Data.NewValue, MaxBat, MaxBat > 0.0f ? (Data.NewValue / MaxBat) : 0.0f);
+}
+
+void ACharacterBase::HandleMaxBatteryChanged(const FOnAttributeChangeData& Data)
+{
+	if (!BaseAttribute) return;
+	float CurrBat = BaseAttribute->GetBattery();
+	OnBatteryUpdated(CurrBat, Data.NewValue, Data.NewValue > 0.0f ? (CurrBat / Data.NewValue) : 0.0f);
+}
+
+float ACharacterBase::GetCalculatedWalkSpeed() const
+{
+	if (!BaseAttribute)
+	{
+		return 300.0f;
+	}
+
+	// 1. 상태별 기본 걷기 속도 (Base Speed) 결정
+	float BaseSpeed = 300.0f;
+
+	static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+	static const FGameplayTag HeavyCarryTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Heavy"), false);
+	static const FGameplayTag CarryCharTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Carrying.Character"), false);
+
+	if ((PushingTag.IsValid() && HasMatchingGameplayTag(PushingTag)) ||
+		(HeavyCarryTag.IsValid() && HasMatchingGameplayTag(HeavyCarryTag)) ||
+		(CarryCharTag.IsValid() && HasMatchingGameplayTag(CarryCharTag)))
+	{
+		BaseSpeed = 150.0f; // 밀기, 무거운 택배 운반, 시체 운반 시 기본 속도 150
+	}
+
+	// 2. 소지 무게 비율(WeightRatio) 계산
+	float MaxWeight = BaseAttribute->GetMaxWeight();
+	if (MaxWeight <= 0.0f)
+	{
+		return BaseSpeed;
+	}
+
+	float WeightRatio = BaseAttribute->GetCurrentWeight() / MaxWeight;
+
+	// 3. 과적 단계별 배율 적용
+	if (WeightRatio > 1.5f)
+	{
+		return 10.0f; // 과적 3단계: 극초저속 10.0f (점프/달리기 완전 차단)
+	}
+	else if (WeightRatio > 1.3f)
+	{
+		return BaseSpeed * 0.50f; // 과적 2단계: 50% 감속 (일반 150, 밀기/무거운택배 75)
+	}
+	else if (WeightRatio > 1.0f)
+	{
+		return BaseSpeed * 0.85f; // 과적 1단계: 15% 감속 (일반 255, 밀기/무거운택배 127.5)
+	}
+
+	return BaseSpeed; // 정상
 }
 
 void ACharacterBase::UpdateEncumbranceState(float InCurrentWeight, float InMaxWeight)
@@ -269,51 +363,132 @@ void ACharacterBase::UpdateEncumbranceState(float InCurrentWeight, float InMaxWe
 
 	float WeightRatio = InCurrentWeight / InMaxWeight;
 
-	// 과적 비율별 상태(디버프) 태그 부여 (블루프린트/GAS 기반 적용을 위한 태그 요청)
-	static const FGameplayTag Encumbered_HeavyTag = FGameplayTag::RequestGameplayTag(FName("State.Encumbered.Heavy"), false);
-	static const FGameplayTag Encumbered_OverloadedTag = FGameplayTag::RequestGameplayTag(FName("State.Encumbered.Overloaded"), false);
-	static const FGameplayTag Encumbered_ImmobileTag = FGameplayTag::RequestGameplayTag(FName("State.Encumbered.Immobile"), false);
+	static const FGameplayTag Encumbered_HeavyTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Heavy"), false);
+	static const FGameplayTag Encumbered_OverloadedTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Overloaded"), false);
+	static const FGameplayTag Encumbered_ImmobileTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Encumbered.Immobile"), false);
+
+	AMainCharacter* MainChar = Cast<AMainCharacter>(this);
+	if (MainChar)
+	{
+		// 과적 2단계(> 1.3f) 이상이면 달리기 즉시 강제 해제
+		if (WeightRatio > 1.3f && MainChar->bIsSprinting)
+		{
+			MainChar->StopSprinting();
+		}
+	}
+
+	if (HasAuthority() && AbilitySystemComponent)
+	{
+		if (ActiveEncumbranceEffectHandle.IsValid())
+		{
+			AbilitySystemComponent->RemoveActiveGameplayEffect(ActiveEncumbranceEffectHandle);
+			ActiveEncumbranceEffectHandle.Invalidate();
+		}
+
+		TSubclassOf<UGameplayEffect> EffectToApply = nullptr;
+
+		if (WeightRatio > 1.5f)
+		{
+			EffectToApply = EncumberedTier3Effect;
+		}
+		else if (WeightRatio > 1.3f)
+		{
+			EffectToApply = EncumberedTier2Effect;
+		}
+		else if (WeightRatio > 1.0f)
+		{
+			EffectToApply = EncumberedTier1Effect;
+		}
+
+		if (EffectToApply)
+		{
+			FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+			Context.AddSourceObject(this);
+			ActiveEncumbranceEffectHandle = AbilitySystemComponent->ApplyGameplayEffectToSelf(
+				EffectToApply.GetDefaultObject(), 1.0f, Context);
+		}
+		else if (BaseAttribute)
+		{
+			// GE가 할당되지 않았거나 과적이 해제(<= 1.0f)되었을 때 C++ 속도 직접 복구 및 적용 폴백
+			float TargetSpeed = GetCalculatedWalkSpeed();
+
+			// 현재 달리는 상태(Tier 1 이하)라면 달리기 배율(2.0x) 적용
+			if (MainChar && MainChar->bIsSprinting && WeightRatio <= 1.3f)
+			{
+				TargetSpeed *= 2.0f;
+			}
+
+			BaseAttribute->SetMoveSpeed(TargetSpeed);
+			if (GetCharacterMovement())
+			{
+				GetCharacterMovement()->MaxWalkSpeed = TargetSpeed;
+			}
+		}
+	}
 
 	if (StatusComponent)
 	{
-		// 1. 기존 과적 태그 일괄 제거
 		StatusComponent->RemoveStatusTag(Encumbered_HeavyTag);
 		StatusComponent->RemoveStatusTag(Encumbered_OverloadedTag);
 		StatusComponent->RemoveStatusTag(Encumbered_ImmobileTag);
 
-		// 2. 구간별(Tier) 디버프 적용 (옵션 A)
 		if (WeightRatio > 1.5f)
 		{
-			// 이동 불가 (150% 초과) - 속도 극감 및 상태 이상
 			StatusComponent->AddStatusTag(Encumbered_ImmobileTag);
-			UE_LOG(LogTemp, Warning, TEXT("과적 상태: 이동 불가 (무게 비율: %f)"), WeightRatio);
 		}
 		else if (WeightRatio > 1.3f)
 		{
-			// 과적 (130% ~ 150%) - 달리기 불가 등
 			StatusComponent->AddStatusTag(Encumbered_OverloadedTag);
-			UE_LOG(LogTemp, Warning, TEXT("과적 상태: 달리기 불가 (무게 비율: %f)"), WeightRatio);
 		}
 		else if (WeightRatio > 1.0f)
 		{
-			// 무거움 (100% ~ 130%) - 속도 약간 감소
 			StatusComponent->AddStatusTag(Encumbered_HeavyTag);
-			UE_LOG(LogTemp, Warning, TEXT("과적 상태: 속도 감소 (무게 비율: %f)"), WeightRatio);
 		}
 	}
 }
 
+void ACharacterBase::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
+{
+	TagContainer.Reset();
+	if (AbilitySystemComponent)
+	{
+		AbilitySystemComponent->GetOwnedGameplayTags(TagContainer);
+	}
+}
+
+bool ACharacterBase::HasMatchingGameplayTag(FGameplayTag TagToCheck) const
+{
+	if (AbilitySystemComponent)
+	{
+		return AbilitySystemComponent->HasMatchingGameplayTag(TagToCheck);
+	}
+	return false;
+}
+
+bool ACharacterBase::HasAllMatchingGameplayTags(const FGameplayTagContainer& TagContainer) const
+{
+	if (AbilitySystemComponent)
+	{
+		return AbilitySystemComponent->HasAllMatchingGameplayTags(TagContainer);
+	}
+	return false;
+}
+
+bool ACharacterBase::HasAnyMatchingGameplayTags(const FGameplayTagContainer& TagContainer) const
+{
+	if (AbilitySystemComponent)
+	{
+		return AbilitySystemComponent->HasAnyMatchingGameplayTags(TagContainer);
+	}
+	return false;
+}
+
 float ACharacterBase::GetPushResistance_Implementation() const
 {
-	// 플레이어는 저항이 없으므로 항상 밀림
 	return 0.0f;
 }
 
 void ACharacterBase::Push_Implementation(AActor* Pusher, FVector PushDirection)
 {
-	// TODO: 플레이어가 밀렸을 때 넘어지는 애니메이션 몽타주 실행 및 넉백 처리
-	UE_LOG(LogTemp, Log, TEXT("플레이어가 밀렸습니다! 넘어지는 애니메이션 연출 필요. 방향: %s"), *PushDirection.ToString());
-	
-	// 가벼운 넉백 (예시)
 	LaunchCharacter(PushDirection * 500.0f + FVector(0, 0, 200.0f), true, true);
 }

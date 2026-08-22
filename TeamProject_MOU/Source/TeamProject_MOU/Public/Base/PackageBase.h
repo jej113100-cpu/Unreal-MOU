@@ -12,7 +12,8 @@ enum class EPackageType : uint8
 	Heavy UMETA(DisplayName = "무거운 물품"),
 	Fragile UMETA(DisplayName = "깨지기 쉬운 물품"),
 	Perishable UMETA(DisplayName = "상하기 쉬운 물품"),
-	Dangerous UMETA(DisplayName = "위험 물품")
+	Dangerous UMETA(DisplayName = "위험 물품"),
+	Quest UMETA(DisplayName = "퀘스트 물품")
 };
 
 UCLASS()
@@ -45,6 +46,14 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Package|Status")
 	float CurrentSpoilTime = 0.0f;
+
+	// 현재 내구도 및 신선도(상함)를 반영한 실제 가치 계산
+	UFUNCTION(BlueprintCallable, Category = "Package|Data")
+	int32 GetCurrentValue() const;
+
+	// 던져진 택배에 맞아 넘어지는 최소 속도 기준
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Data")
+	float KnockdownThresholdSpeed = 500.0f;
 
 	// ---------------------------------------------------------
 	// [운반 부착 포인트 (핸들)]
@@ -90,17 +99,25 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
 	float MaxCarryDistance = 250.0f;
 
-	// [무거운 택배 전용] 운반자 손 소켓 이름 (CarryingComponent의 CarrySocketName과 일치해야 함)
+	// [2인 협동] 두 번째 운반자 손 소켓 이름 (공통 CarrySocket 사용 가능)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
 	FName CarrySocketName = TEXT("CarrySocket");
+
+	// [1인 드래그] 혼자 무거운 택배를 끌 때 패키지가 붙는 위치 소켓 (등/어깨 쪽)
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
+	FName DragSocketName = TEXT("DragSocket");
 
 	// [무거운 택배 전용] Handle_Front와 Handle_Back 사이의 거리 (메시에 맞게 조절)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
 	float HandleLength = 100.0f;
 
+
 protected:
 	// [무거운 택배 전용] Tick에서 서버가 패키지 위치/회전을 계산하고 이동시킴
 	void UpdateHeavyPackagePosition(float DeltaTime);
+
+	// [전환 유예] 2→1인 전환 직후 이탈 검사를 잠시 스킵하여 강제 드랍 연쇄 방지
+	float TransitionGracePeriod = 0.0f;
 
 public:
 
@@ -139,6 +156,13 @@ public:
 	
 	// 택배는 일반 아이템처럼 우클릭/좌클릭 사용이 불가능함
 	virtual void OnUse_Implementation() override;
+
+	// 택배는 F키 상호작용 대상이 아니며, 오직 E키로만 잡고/들고/던집니다.
+	virtual bool CanInteract_Implementation(AActor* Interactor) const override;
+
+	// [클라이언트 동기화] 물리 콜리전 상태 동기화를 위해 오버라이드
+	virtual void MulticastPickUp_Implementation(AActor* Picker) override;
+	virtual void MulticastDrop_Implementation(FVector DropLocation, AActor* Dropper = nullptr) override;
 
 	// ---------------------------------------------------------
 	// [밀기 인터페이스 구현 (IPushableInterface)]

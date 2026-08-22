@@ -18,9 +18,17 @@ FGameplayTag UNPCData::StayTag() const
 	return UGameplayTagsManager::Get().RequestGameplayTag(TEXT("State.NPC.Stay"));
 }
 
+FGameplayTag UNPCData::HomeTag() const
+{
+	return UGameplayTagsManager::Get().RequestGameplayTag(TEXT("State.NPC.Home"));
+}
+
 UNPCData::UNPCData()
 	: StartState(ENPCStartState::Patrol)
 	, UsePatrol(true)
+	, PatrolType(ENPCPatrolType::RandomRadius)
+	, PatrolRadius(1000.0f)
+	, SplinePatrolRadius(200.0f)
 	, AfterActionPolicy(ENPCAfterActionPolicy::RepeatWhileTargetVisible)
 	, LostTargetPolicy(ENPCLostTargetPolicy::ReturnToPatrol)
 	, ActionRange(200.0f)
@@ -36,6 +44,8 @@ FGameplayTag UNPCData::GetStartStateTag() const
 	{
 	case ENPCStartState::Stay:
 		return StayTag();
+	case ENPCStartState::Home:
+		return HomeTag();
 	case ENPCStartState::Patrol:
 	default:
 		return PatrolTag();
@@ -54,7 +64,8 @@ FGameplayTag UNPCData::GetOneShotAfterActionStateTag() const
 	case ENPCAfterActionPolicy::OneShotThenStay:
 		return StayTag();
 	case ENPCAfterActionPolicy::OneShotThenTracking:
-		return TrackingTag();
+		// 기존 데이터 호환용 값이며, OneShot 완료 후에는 더 이상 Tracking으로 복귀하지 않는다.
+		return StayTag();
 	case ENPCAfterActionPolicy::OneShotThenPatrol:
 		return PatrolTag();
 	case ENPCAfterActionPolicy::RepeatWhileTargetVisible:
@@ -75,7 +86,7 @@ FGameplayTag UNPCData::GetLostTargetStateTag() const
 	case ENPCLostTargetPolicy::ReturnToStay:
 		return StayTag();
 	case ENPCLostTargetPolicy::ReturnHome:
-		return UsePatrol ? PatrolTag() : StayTag();
+		return HomeTag();
 	case ENPCLostTargetPolicy::ReturnToPatrol:
 	default:
 		return PatrolTag();
