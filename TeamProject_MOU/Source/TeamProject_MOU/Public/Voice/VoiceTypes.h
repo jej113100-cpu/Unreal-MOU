@@ -1,4 +1,4 @@
-// MOU 음성 - 음성 시스템 전체가 공유하는 타입과 상수.
+﻿// MOU 음성 - 음성 시스템 전체가 공유하는 타입과 상수.
 //
 // [이 파일이 시스템 어디에 있나]
 //   Voice/ 폴더의 모든 파일이 이 헤더를 include 한다. 여기에는 로직이 없다.
@@ -37,6 +37,42 @@ enum class EVoiceMode : uint8
 	/** 범위 검사용. 실제 모드가 아니다. 항상 마지막에 둘 것. */
 	MAX UMETA(Hidden),
 };
+
+
+/**
+* 마이크 상태 표시용도
+* 마이크 없음 , 음소거, 대기상태, 발화상태,사망상태
+*/
+UENUM(BlueprintType)
+enum class EMicIconState : uint8
+{
+	NoDevice UMETA(DisplayName = "마이크 없음"),
+	Muted	 UMETA(DisplayName = "음소거"),
+	Idle	 UMETA(DisplayName = "대기상태"),
+	Speaking UMETA(DisplayName = "말하는 중"),
+	Calibrating UMETA(DisplayName = "감도보정"),
+	Dead	 UMETA(DisplayName = "사망상태")
+};
+
+/**
+* 무전기 상태 표시용도. 아이콘 4장(전원 OFF / 전원 ON / 송신 / 수신)에 대응한다.
+*
+* ★ None 에는 아이콘이 없다. 무전기를 안 가진 것은 정상 상태라서 위젯 자체를
+*   숨긴다 - 마이크와 다르다(마이크 없음은 설정이 잘못됐다는 경고라 항상 뜬다).
+*
+* ★ 송신과 수신이 동시에 성립하면 **송신이 이긴다.** 이 게임에서 송신은 곧
+*   위치가 새는 것이라, 켜진 줄 모르는 쪽이 훨씬 위험하다.
+*/
+UENUM(BlueprintType)
+enum class ERadioIconState : uint8
+{
+	None         UMETA(DisplayName = "무전기 없음"), // 위젯 Collapsed
+	Off          UMETA(DisplayName = "전원 꺼짐"),
+	On           UMETA(DisplayName = "전원 켜짐"),
+	Transmitting UMETA(DisplayName = "송신 중"),
+	Receiving    UMETA(DisplayName = "수신 중"),
+};
+
 
 /**
  * 이 목소리가 어느 경로로 전달되는가.
@@ -105,6 +141,14 @@ namespace MOUVoice
 	inline constexpr int32 FrameMs          = 20;
 	inline constexpr int32 SamplesPerFrame  = SampleRate * FrameMs / 1000;  // 320
 	inline constexpr int32 BytesPerFrame    = SamplesPerFrame * sizeof(int16); // 640
+
+	/**
+	 * 프레임 하나의 길이(초). 시간 기반 계산에 쓴다.
+	 *
+	 * ★ 엔벨로프 진행에는 **실제 경과 시간이 아니라 이 값**을 써야 한다.
+	 *   이유는 AdvanceLoudnessEnvelope 주석에 적어두었다.
+	 */
+	inline constexpr float FrameSeconds = FrameMs / 1000.f;
 
 	// -----------------------------------------------------------------------
 	// Opus 코덱 (V2)
@@ -379,6 +423,252 @@ namespace MOUVoice
 		== GetHearRadius(EVoiceMode::Shout), "외침: Radius + Falloff 가 총 가청 거리와 다르다");
 
 	// -----------------------------------------------------------------------
+	// 음량에 따른 반경 조절 — ★ 아날로그 (연속)
+	//
+	// [무엇을 하는가]
+	//   위의 GetHearRadius / GetNoiseRange 는 발화 모드가 정하는 **상한**이다.
+	//   여기서부터는 **실제로 얼마나 크게 말했는지**에 따라 그 상한 아래로
+	//   반경이 연속적으로 줄어든다. 조용히 말하면 원이 작아지고, 크게 말하면
+	//   모드 상한까지 커진다.
+	//
+	// [★ 왜 아날로그(연속)인가 - 디지털(단계)을 버린 이유]
+	//
+	//   RMS 는 한 문장 안에서도 크게 출렁인다(음절 사이 공백, 파열음).
+	//   임계값을 두고 "넘으면 큰 원" 으로 만들면 **같은 톤으로 말하는 동안에도
+	//   원이 초당 몇 번씩 왕복한다.** 플레이어는 그것을 규칙이 아니라 버그로
+	//   읽는다 - 규칙을 배울 수가 없기 때문이다.
+	//
+	//   연속 함수는 단조증가라서 숫자를 몰라도 **"조용히 말하면 안전하다" 가
+	//   예외 없이 성립한다.** 이 게임이 요구하는 학습 가능성은 그쪽에서 나온다.
+	//   그리고 단계 축은 이미 발화 모드(속삭임/보통/외침)가 담당하고 있으므로,
+	//   여기에 단계를 또 얹으면 조합이 9개로 늘어 밸런싱만 어려워진다.
+	//
+	// [★★ 어디에 적용하고 어디에 적용하지 않는가 - 이 구분이 핵심이다]
+	//
+	//   적용한다:        · 클라 감쇠 (실제로 들리는 거리)
+	//                    · NPC 소음 MaxRange
+	//                    · 디버그 링 (MOU.Voice.ShowRadius)
+	//
+	//   적용하지 않는다: · **서버 근접 라우팅 컷 거리** (ProximityRoutingMargin 쪽)
+	//
+	//   라우팅 컷을 음량에 따라 움직이면 경계 근처 청취자가 수신자 목록에
+	//   들락날락해서 **프레임이 끊겼다 붙었다 한다.** ProximityRoutingMargin(1.2)
+	//   과 FalloffMode=Silent 가 애초에 막으려고 있는 그 지직거림이다.
+	//
+	//   그래서 **라우팅은 모드 상한으로 넉넉히 보내고, 조용한 소리가 멀리
+	//   안 들리게 만드는 일은 클라 감쇠에 맡긴다.** 대역폭 상한은 어차피
+	//   모드가 이미 정하고 있으므로 잃는 것이 없다.
+	//
+	// [★★ 정규화는 반드시 클라이언트에서 한다 - 서버는 할 수 없다]
+	//
+	//   서버는 **각 플레이어의 마이크 보정값(VadThreshold)을 모른다.** 그래서
+	//   원본 RMS 를 받아서는 그것이 "크게 말한 것" 인지 "마이크가 센 것" 인지
+	//   구분할 수 없다. 그대로 쓰면 **부스트를 켠 마이크가 공짜로 큰 원을
+	//   얻는다** - 숨는 것이 핵심인 게임에서 이건 밸런스 붕괴다.
+	//
+	//   그래서 클라가 NormalizeLoudness() 로 0~1 강도를 만들어 보내고,
+	//   서버와 다른 클라는 GetRadiusScaleFromNormalized() 만 쓴다.
+	//   FVoiceFrame::Loudness 에 실려 오는 값이 **원본 RMS 가 아니라 이
+	//   정규화된 강도**인 이유다(그 필드 주석 참고).
+	// -----------------------------------------------------------------------
+
+	// ★ 아래 세 개는 **런타임에 바뀔 수 있는 튜닝 값**이다(MOU.Voice.LoudnessCurve).
+	//   constexpr 이 아닌 이유는 마이크마다 맞춰야 하는 값이라서다 - 감도
+	//   보정(MOU.Voice.Calibrate)과 같은 성격이다.
+	//
+	//   ★ PIE 처럼 한 프로세스 안에 서버와 클라가 같이 있을 때만 자동으로
+	//     일치한다. 데디케이티드 서버로 가면 이 값이 양쪽에서 갈라질 수 있고,
+	//     그러면 "화면에 보이는 원" 과 "NPC 가 듣는 거리" 가 어긋난다.
+	//     그때는 설정(UDeveloperSettings)으로 빼서 서버 값을 권위로 삼아야 한다.
+
+	/**
+	 * 정규화 상한. 음량이 이 값에 닿으면 반경이 모드 상한(배율 1.0)에 도달한다.
+	 *
+	 * VadThreshold 에서 이 값까지가 곧 **조절 구간**이다.
+	 * 너무 높으면 어지간히 소리쳐도 원이 안 커지고, 너무 낮으면 평상시 말소리가
+	 * 이미 상한에 붙어서 조절이 아예 안 된다.
+	 */
+	inline float LoudnessCeiling = 0.25f;
+
+	/**
+	 * 가장 조용하게 말했을 때의 반경 배율(하한).
+	 *
+	 * ★ 0 으로 두지 않는다. VAD 를 통과했다는 것은 **소리를 냈다는 뜻**이고,
+	 *   배율이 0 이면 말했는데 아무에게도 안 들리는 구간이 생겨 "마이크가
+	 *   고장났나" 로 보인다. 들리기는 해야 하고, 아주 가까이서만 들려야 한다.
+	 */
+	inline float MinRadiusScale = 0.4f;
+
+	/**
+	 * 조절 곡선의 지수. 1.0 이면 직선, 클수록 조용한 구간이 넓게 펴진다.
+	 *
+	 * 1.5 인 이유: 이 게임에서 플레이어가 실제로 하는 판단은 "얼마나 크게
+	 * 말할까" 가 아니라 **"얼마나 조용해야 안전한가"** 다. 그 구간의 해상도를
+	 * 넓게 주는 편이 맞다.
+	 */
+	inline float RadiusCurveExponent = 1.5f;
+
+	/**
+	 * 엔벨로프 상승 시정수(초). **거의 즉시**에 가깝게 짧다.
+	 *
+	 * ★ 왜 이렇게 짧은가: NPC 소음은 집계 창(NoiseWindowSec 0.3초)의 **첫
+	 *   프레임에 한 번** 쏘고 나머지를 억제한다(7-5절). 상승이 느리면 그
+	 *   첫 프레임에서 엔벨로프가 아직 절반밖에 안 올라와 있어서, **소리치며
+	 *   시작한 발화가 작은 반경으로 보고된다.** 특히 0.3초보다 짧은 발화
+	 *   ("헉!")는 그 한 번이 전부라 통째로 과소평가된다.
+	 *
+	 *   20ms 프레임에서 계수가 0.87 이라 사실상 한 프레임에 따라잡는다.
+	 *   0 이 아닌 이유는 단일 프레임 튐(파열음 하나)을 걸러내기 위해서다.
+	 *
+	 * 떨림을 막는 일은 상승이 아니라 **하강**이 한다(아래).
+	 */
+	inline constexpr float LoudnessAttackSeconds = 0.01f;
+
+	/**
+	 * 엔벨로프 하강 시정수(초). ★ 상승보다 훨씬 길다.
+	 *
+	 * 이게 짧으면 음절 사이 공백마다 엔벨로프가 바닥까지 떨어져 **원이
+	 * 펄럭인다** - 아날로그로 만든 이유가 통째로 사라진다. 반대로 말이 끝나고
+	 * 원이 줄어드는 데 0.25초가 걸리는 것은 눈에 거슬리지 않는다.
+	 */
+	inline constexpr float LoudnessReleaseSeconds = 0.25f;
+
+	/**
+	 * 엔벨로프 한 스텝. 상승은 빠르게, 하강은 느리게 따라간다.
+	 *
+	 * @param Envelope       직전 엔벨로프 값(호출자가 들고 있는 상태)
+	 * @param Rms            이번 프레임의 순간 RMS
+	 * @param DeltaSeconds   ★ **FrameSeconds 를 넣는다.** 실제 경과 시간이 아니다.
+	 *
+	 * ★ 왜 실제 경과 시간이 아닌가: 캡처는 누적 버퍼를 20ms 씩 잘라내는 루프라
+	 *   한 틱에 프레임 여러 개가 한꺼번에 나온다. 거기서 실제 경과 시간을 쓰면
+	 *   **첫 프레임이 시간을 다 먹고 나머지는 0 이 되어** 엔벨로프가 계단이 된다.
+	 *   프레임은 마이크가 만든 시간 순서대로 20ms 씩 흘러야 한다.
+	 */
+	inline float AdvanceLoudnessEnvelope(float Envelope, float Rms, float DeltaSeconds)
+	{
+		const float Tau = (Rms > Envelope) ? LoudnessAttackSeconds : LoudnessReleaseSeconds;
+
+		// 표준 일차 저역통과. 시정수로 두면 프레임 간격이 바뀌어도 반응 속도가 같다.
+		const float Coefficient =
+			1.f - FMath::Exp(-DeltaSeconds / FMath::Max(Tau, UE_KINDA_SMALL_NUMBER));
+
+		return Envelope + (Rms - Envelope) * FMath::Clamp(Coefficient, 0.f, 1.f);
+	}
+
+	/**
+	 * VadThreshold 와 LoudnessCeiling 사이에 최소한 이만큼의 폭이 있어야 한다.
+	 *
+	 * ★★ 이것이 없으면 아날로그 반경이 **조용히 죽는다.**
+	 *
+	 *   감도 보정은 잡음 바닥 x CalibrationMargin(2.0) 을 기준으로 잡는다.
+	 *   3.5mm 아날로그 입력처럼 잡음이 큰 마이크(피크 0.15)에서는 기준이
+	 *   0.30 이 되는데, 이는 LoudnessCeiling(0.25)보다 **높다.**
+	 *
+	 *   그러면 NormalizeLoudness 의 Span 이 0 이하가 되어 KINDA_SMALL_NUMBER 로
+	 *   잘리고, **모든 발화가 강도 1.0 으로 clamp 된다** - 속삭이든 소리치든
+	 *   항상 최대 반경이다. 예외도 로그도 없이 기능만 사라지므로 원인을
+	 *   찾기가 매우 고약하다.
+	 *
+	 *   0.08 은 "조절 구간이 이 정도는 돼야 속삭임과 외침이 구분된다" 는 값이다.
+	 */
+	inline constexpr float MinLoudnessSpan = 0.08f;
+
+	/**
+	 * 감도가 바뀌었을 때 조절 구간이 무너지지 않도록 상한을 밀어올린다.
+	 *
+	 * **감도를 바꾸는 모든 경로에서 불러야 한다**(자동 보정, 콘솔 수동 설정).
+	 * 한 곳이라도 빠뜨리면 그 경로로 들어온 사용자만 아날로그가 안 먹는다.
+	 *
+	 * @return 상한을 실제로 올렸으면 true (호출자가 로그를 남길 수 있게)
+	 */
+	inline bool EnsureUsableLoudnessSpan(float VadThreshold)
+	{
+		const float Required = FMath::Max(VadThreshold, 0.f) + MinLoudnessSpan;
+
+		if (LoudnessCeiling >= Required)
+		{
+			return false;
+		}
+
+		LoudnessCeiling = Required;
+		return true;
+	}
+
+	/**
+	 * 엔벨로프를 통과한 RMS 를 0~1 **발화 강도**로 정규화한다. **클라 전용.**
+	 *
+	 * ★ 조절 구간의 시작을 VadThreshold 에 맞추는 것이 요점이다.
+	 *   0 에서 시작하면, 잡음 바닥이 높은 마이크(메인보드 3.5mm 아날로그는
+	 *   가만히 있어도 RMS 0.03~0.08 이 나온다)에서는 **그 잡음이 이미 구간의
+	 *   절반을 차지해 속삭여도 원이 중간 크기부터 시작한다.** 감도 보정이
+	 *   해결한 문제와 정확히 같은 문제다(9절).
+	 *
+	 * @param LoudnessEnvelope  AdvanceLoudnessEnvelope 를 통과한 값. 순간 RMS 를
+	 *                          그대로 넣으면 원이 떨린다.
+	 * @param VadThreshold      이 클라의 VAD 기준. 조절 구간의 시작점.
+	 */
+	inline float NormalizeLoudness(float LoudnessEnvelope, float VadThreshold)
+	{
+		const float Floor = FMath::Max(VadThreshold, 0.f);
+		const float Span  = FMath::Max(LoudnessCeiling - Floor, UE_KINDA_SMALL_NUMBER);
+
+		return FMath::Clamp((LoudnessEnvelope - Floor) / Span, 0.f, 1.f);
+	}
+
+	/**
+	 * 정규화된 발화 강도(0~1)를 반경 배율(MinRadiusScale ~ 1.0)로 바꾼다.
+	 *
+	 * ★★ 반경에 곱하는 배율이 나오는 곳은 **이 함수 하나뿐이어야 한다.**
+	 *   클라 감쇠, NPC 소음, 디버그 링이 전부 여기를 거쳐야 "화면에 보이는 원"
+	 *   과 "실제로 들리는 거리" 가 어긋나지 않는다. 위 단일 진실 공급원 주석과
+	 *   같은 이유이고, 어긋나면 증상이 똑같이 고약하다 - 디버그 표시가
+	 *   거짓말을 하기 시작하므로 밸런싱이 불가능해진다.
+	 */
+	inline float GetRadiusScaleFromNormalized(float Normalized01)
+	{
+		const float T = FMath::Clamp(Normalized01, 0.f, 1.f);
+
+		// ★ 지수를 먼저 먹인 뒤 하한과 보간한다. 순서를 바꾸면 하한까지 곡선에
+		//   눌려서 "가장 조용할 때의 배율" 이 MinRadiusScale 이 아니게 된다.
+		const float Curved = FMath::Pow(T, FMath::Max(RadiusCurveExponent, UE_KINDA_SMALL_NUMBER));
+
+		return FMath::Lerp(FMath::Clamp(MinRadiusScale, 0.f, 1.f), 1.f, Curved);
+	}
+
+	/**
+	 * 반경 배율이 이만큼 벌어져야 재생 중인 사운드의 감쇠를 실제로 갱신한다.
+	 *
+	 * ★ 배율은 음량을 따라 매 프레임 조금씩 움직이는 연속값이다. 갱신을
+	 *   막지 않으면 재생 중인 스트림마다 매 프레임 오디오 스레드로 명령이
+	 *   나간다(UVoiceSynthComponent::SetProximityMode 헤더 주석). 이 정도
+	 *   문턱이면 사람 귀에는 여전히 매끄럽게 이어지면서 갱신 빈도만 줄어든다.
+	 */
+	inline constexpr float RadiusScaleUpdateEpsilon = 0.03f;
+
+	/**
+	 * 이 발화가 실제로 사람에게 들리는 총 거리(cm).
+	 *
+	 * 모드 상한에 음량 배율을 곱한 것이다. 클라 감쇠와 디버그 링이 쓴다.
+	 */
+	inline float GetScaledHearRadius(EVoiceMode Mode, float Normalized01)
+	{
+		return GetHearRadius(Mode) * GetRadiusScaleFromNormalized(Normalized01);
+	}
+
+	/**
+	 * 이 발화를 NPC 가 듣는 거리(cm). `ReportNoiseEvent` 의 MaxRange 로 들어간다.
+	 *
+	 * ★ 사람이 듣는 거리보다 넓다는 성질은 배율을 곱해도 유지된다 - 양쪽에
+	 *   **같은 배율**이 곱해지기 때문이다. 한쪽만 곱하면 "나한테는 조용한데
+	 *   NPC 는 똑같이 다 듣는" 상태가 되어 13절의 의도가 깨진다.
+	 */
+	inline float GetScaledNoiseRange(EVoiceMode Mode, float Normalized01)
+	{
+		return GetNoiseRange(Mode) * GetRadiusScaleFromNormalized(Normalized01);
+	}
+
+	// -----------------------------------------------------------------------
 	// 서버 라우팅 (V3)
 	// -----------------------------------------------------------------------
 
@@ -485,6 +775,19 @@ namespace MOUVoice
 	 * VAD hangover(0.2초)보다 커야 한 문장 안에서 리셋되지 않는다.
 	 */
 	inline constexpr double VoiceUtteranceGapSeconds = 0.5;
+
+	/**
+	 * "무전 수신 중" 표시를 프레임 하나마다 몇 초씩 붙잡아 둘지(초).
+	 *
+	 * ★ 이게 없으면 아이콘이 발작한다. 프레임은 20ms 간격으로 오는데, 한 프레임
+	 *   늦거나 빠지기만 해도 "수신 중" 이 켜졌다 꺼졌다 하기 때문이다. 사람 눈에
+	 *   깜빡임으로 안 보이려면 프레임 간격보다 한참 커야 한다.
+	 *
+	 * VoiceUtteranceGapSeconds(0.5)보다는 **작아야 한다.** 말이 끝났는데도
+	 * 수신 아이콘이 남아 있으면 "누가 아직 무전을 잡고 있다" 로 잘못 읽힌다 -
+	 * 그건 숨을지 말지를 가르는 정보라 틀리면 안 된다.
+	 */
+	inline constexpr double RadioReceiveHoldSeconds = 0.2;
 
 	/** 음량(0~1)을 패킷에 실을 uint8 로 양자화한다. */
 	inline uint8 QuantizeLoudness(float Loudness01)
@@ -640,7 +943,19 @@ struct FVoiceFrame
 	 */
 	UPROPERTY() EVoiceMode Mode = EVoiceMode::Normal;
 
-	/** RMS 를 0~255 로 양자화한 값. UI 게이지와 V8 의 소음 크기에 쓴다. */
+	/**
+	 * **정규화된 발화 강도**(0~1)를 0~255 로 양자화한 값. 원본 RMS 가 아니다.
+	 *
+	 * ★ 왜 원본 RMS 가 아닌가: 서버는 이 클라의 마이크 보정값을 모르므로
+	 *   원본을 받아서는 "크게 말한 것" 과 "마이크가 센 것" 을 구분할 수 없다.
+	 *   그대로 반경에 쓰면 부스트를 켠 마이크가 공짜로 큰 원을 얻는다.
+	 *   그래서 클라가 NormalizeLoudness() 를 거친 값을 실어 보낸다
+	 *   (위 "정규화는 반드시 클라이언트에서" 주석).
+	 *
+	 * 서버는 이 값을 GetScaledNoiseRange 에, 받는 클라는 감쇠 배율에 쓴다.
+	 * 로컬 마이크 게이지는 이 값이 아니라 원본 RMS 를 쓴다
+	 * (FVoiceCaptureSource::GetCurrentLoudness).
+	 */
 	UPROPERTY() uint8 Loudness = 0;
 
 	/** Opus 압축 바이트. 정상값은 50~70바이트. 상한은 MOUVoice::MaxEncodedFrameBytes. */
@@ -677,7 +992,14 @@ struct FVoiceFrameOut
 	 */
 	UPROPERTY() EVoiceMode Mode = EVoiceMode::Normal;
 
-	/** 말하는 중 UI 표시(아이콘/게이지)에 쓴다. */
+	/**
+	 * 서버가 확정해 넘기는 **정규화된 발화 강도**(FVoiceFrame::Loudness 와 같은 값).
+	 *
+	 * 받는 클라는 이 값으로 감쇠 반경 배율을 정한다 - 조용히 말한 목소리는
+	 * 가까이서만 들려야 하고, 그 판정이 서버의 NPC 소음 반경과 **같은 값에서
+	 * 나와야** 화면의 원과 실제로 들리는 거리가 맞는다.
+	 * 말하는 사람 표시(아이콘/게이지)에도 그대로 쓴다.
+	 */
 	UPROPERTY() uint8 Loudness = 0;
 
 	/**

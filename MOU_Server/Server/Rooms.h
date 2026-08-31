@@ -53,11 +53,15 @@ namespace MOU
 		 *
 		 * @param HostUserId  방장의 계정 번호
 		 * @param HostName    방장 닉네임 (목록 표시용)
-		 * @param HostAddress 서버가 TCP 연결에서 읽은 방장의 IP. 클라이언트 신고값이 아니다
+		 * @param Candidates  호스트에게 가는 길들. (v8)
+		 *                    공인 주소는 서버가 TCP 연결에서 읽은 값이고, 사설 주소는
+		 *                    호스트가 신고했지만 서버가 사설 대역인지 검사한 뒤에만 들어온다.
+		 *                    만드는 곳은 Server.cpp 의 BuildHostCandidates 하나뿐이다.
 		 * @param OutRoomId   성공 시 새 방 번호
 		 */
 		ERoomResult Create(uint64_t HostUserId, const std::string& HostName,
-		                   const std::string& HostAddress, uint16_t HostPort,
+		                   const std::vector<HostCandidate>& Candidates,
+		                   bool bLanOnly,
 		                   const std::string& Title, bool bHasPassword,
 		                   const std::string& Password, uint8_t MaxPlayers,
 		                   uint32_t& OutRoomId);
@@ -74,7 +78,7 @@ namespace MOU
 		 */
 		ERoomResult Join(uint32_t RoomId, uint64_t UserId, const std::string& Name,
 		                 const std::string& Password,
-		                 std::string& OutHostAddress, uint16_t& OutHostPort);
+		                 std::vector<HostCandidate>& OutCandidates, bool& bOutLanOnly);
 
 		/**
 		 * 방에서 나간다. 방장이 나가면 방이 통째로 사라진다.
@@ -106,7 +110,8 @@ namespace MOU
 		 * @param OutNotifyUserIds 시작을 알려야 할 멤버 전원 (방장 포함)
 		 */
 		ERoomResult StartGame(uint64_t HostUserId, uint32_t& OutRoomId,
-		                      std::string& OutHostAddress, uint16_t& OutHostPort,
+		                      std::vector<HostCandidate>& OutCandidates,
+		                      bool& bOutLanOnly,
 		                      std::vector<uint64_t>& OutNotifyUserIds);
 
 		/**
@@ -124,8 +129,34 @@ namespace MOU
 		 *         NotStarted 아직 StartGame 을 거치지 않은 방이다
 		 */
 		ERoomResult MarkHostReady(uint64_t HostUserId, uint32_t& OutRoomId,
-		                          std::string& OutHostAddress, uint16_t& OutHostPort,
+		                          std::vector<HostCandidate>& OutCandidates,
+		                          bool& bOutLanOnly,
 		                          std::vector<uint64_t>& OutNotifyUserIds);
+
+		/**
+		 * 호스트가 도달성 프로브 결과를 신고했다. (v9)
+		 *
+		 * 서버는 이 값을 판정하지 않고 그대로 받는다 — 패킷이 실제로 도착했는지는
+		 * 호스트 프로세스 안에서만 관측되기 때문이다. 서버가 하는 일은 UDP 를 한 발
+		 * 쏘는 것까지고, 그 뒤는 호스트가 알려줘야 안다.
+		 *
+		 * @return NotInRoom / NotHost / Success
+		 */
+		ERoomResult SetReachability(uint64_t HostUserId, bool bReachable, uint32_t& OutRoomId);
+
+		/**
+		 * 서버가 관측한 방장의 공인 게임 엔드포인트로 방의 공인 후보를 갱신한다. (v10)
+		 *
+		 * [왜 나중에 고치는가 — 순서 때문이다]
+		 *   엔드포인트 등록은 대기실에 들어간 뒤에 일어나므로 **방 생성보다 늦다.**
+		 *   방을 만들 때는 UPnP 가 알려준 포트로 공인 후보를 적어두는데, 그 포트는
+		 *   홀펀칭으로 실제 뚫리는 구멍과 다를 수 있다 — UPnP 정적 매핑이 그 번호를
+		 *   점유하면 동적 흐름은 다른 번호를 받기 때문이다(실측: 7777 vs 1035).
+		 *
+		 *   관측값이 들어오면 그것으로 덮는다. 참여자가 붙어야 하는 곳은
+		 *   "UPnP 가 열었다고 말한 포트" 가 아니라 "실제로 구멍이 뚫린 포트" 다.
+		 */
+		void UpdateHostEndpoint(uint64_t HostUserId, const std::string& Address, uint16_t Port);
 
 		/**
 		 * 방의 현재 멤버 명단을 뜬다. RoomMemberList 를 만들 때 쓴다.
@@ -138,6 +169,15 @@ namespace MOU
 
 		/** 이 사람이 지금 들어가 있는 방. 없으면 0. */
 		uint32_t FindRoomOf(uint64_t UserId);
+
+		/**
+		 * 이 사람이 들어가 있는 방의 진행 상태. 어느 방에도 없으면 false.
+		 *
+		 * ★ 친구 접속 상태(EPresence)를 정하려고 v7 에서 추가했다.
+		 *   FindRoomOf 로 방 번호를 얻고 상태를 다시 묻는 2단계로 하면 그 사이에
+		 *   방이 사라져 판정이 흔들린다 - 한 번의 락 안에서 끝내야 한다.
+		 */
+		bool GetRoomStateOf(uint64_t UserId, ERoomState& OutState);
 
 		/** 대기 중인 방들을 최신순으로 담아준다. 꽉 찬 방과 시작된 방은 빼고 준다. */
 		void ListWaiting(std::vector<RoomInfo>& Out, size_t MaxCount);

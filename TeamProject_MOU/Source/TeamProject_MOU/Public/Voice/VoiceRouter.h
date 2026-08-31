@@ -123,10 +123,14 @@ private:
 	/**
 	 * 발화자 위치에서 NPC 용 소음을 낸다. 집계 창(0.3초) 안이면 아무것도 안 한다.
 	 *
-	 * @param bOnRadio  무전 송신 중인가. true 면 반경이 좁아지고 태그가 바뀐다.
+	 * @param Intensity01  클라가 보낸 **정규화된 발화 강도**(0~1). 모드가 정한
+	 *                     상한 아래로 반경을 줄인다 - 조용히 말하면 NPC 도
+	 *                     가까이서만 듣는다. 원본 RMS 가 아닌 이유는
+	 *                     FVoiceFrame::Loudness 주석 참고.
+	 * @param bOnRadio     무전 송신 중인가. true 면 반경이 좁아지고 태그가 바뀐다.
 	 */
 	void ReportSpeakerNoise(const APawn* SenderPawn, int32 SpeakerId,
-		EVoiceMode Mode, bool bOnRadio, double Now);
+		EVoiceMode Mode, float Intensity01, bool bOnRadio, double Now);
 
 	/** 무전기 스피커 위치에서 소음을 낸다. 마찬가지로 창 단위로 억제한다. */
 	void ReportRadioSpeakerNoise(URadioComponent* Radio, double Now);

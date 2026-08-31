@@ -65,5 +65,15 @@ namespace MOU
 		 */
 		EAccountResult Authenticate(const std::string& LoginId, const std::string& Password,
 		                            uint64_t& OutUserId, std::string& OutNickname);
+
+		/**
+		 * 계정 번호로 닉네임만 조회한다. 없으면 false.
+		 *
+		 * ★ 왜 필요한가 (v7): 친구 알림은 **접속해 있는 쪽에게, 접속하지 않은
+		 *   쪽에 대해** 보내는 경우가 있다 — 오프라인이던 사람의 신청을 수락하는
+		 *   순간이 그렇다. 그때 상대 닉네임을 세션에서만 찾으면 **빈 이름이
+		 *   나가서 친구 목록에 이름 없는 줄이 생긴다.** 세션에 없으면 여기서 읽는다.
+		 */
+		bool GetNickname(uint64_t UserId, std::string& OutNickname);
 	}
 }

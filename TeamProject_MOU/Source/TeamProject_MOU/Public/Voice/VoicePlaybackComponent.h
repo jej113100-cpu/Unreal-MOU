@@ -134,6 +134,16 @@ struct FVoiceStream
 	/** 마지막으로 받은 발화 모드. 재생 시점에 감쇠 반경을 정하는 데 쓴다. */
 	EVoiceMode LastMode = EVoiceMode::Normal;
 
+	/**
+	 * 마지막으로 받은 반경 배율(MinRadiusScale~1.0). ★ 근접에서만 쓴다.
+	 *
+	 * 서버가 실어 보낸 Frame.Loudness(정규화된 발화 강도)를
+	 * MOUVoice::GetRadiusScaleFromNormalized 에 넣은 값을 그대로 저장해 둔다 -
+	 * 재생 시점(PumpStream)마다 다시 계산할 필요가 없다. 무전 라우트는
+	 * 반경이 무전기 속성에서 오므로(SetRadioMode) 이 값을 쓰지 않는다.
+	 */
+	float LastRadiusScale = 1.f;
+
 	/** 이 스트림의 라우트. 소리를 어디에 붙일지와 어떤 톤으로 낼지를 정한다. */
 	EVoiceRoute Route = EVoiceRoute::Proximity;
 
@@ -175,6 +185,27 @@ public:
 
 	/** 지금 살아있는 스트림 수. */
 	int32 GetStreamCount() const { return Streams.Num(); }
+
+	/**
+	 * 지금 무전을 받고 있는가. **UI 의 "수신 중" 표시가 이걸 쓴다.**
+	 *
+	 * [왜 여기에 있는가]
+	 *   "무전이 들어오는 중" 을 아는 곳은 이 컴포넌트뿐이다. 서버는 프레임을
+	 *   쏘고 잊고, UVoiceSubsystem 은 **내가 보내는 것**(IsRadioTransmitting)만
+	 *   알지 받는 것은 모른다. 그래서 이 함수가 없으면 무전기 아이콘 4개 중
+	 *   수신 하나를 그릴 방법이 아예 없었다.
+	 *
+	 * [판정 기준]
+	 *   Route == Radio 인 스트림에 **최근 프레임이 도착했는가**. 재생 여부가
+	 *   아니라 도착 여부인 것이 의도적이다 - 지터버퍼 지연만큼 늦게 켜지면
+	 *   소리가 이미 나는데 아이콘은 아직 꺼져 있게 된다.
+	 *
+	 *   스트림이 살아있는 것만으로는 안 된다. 스트림은 말이 끝나도
+	 *   VoiceStreamIdleTimeoutSeconds(3초)까지 남아 있어서, 그걸로 판정하면
+	 *   **아무도 말하지 않는데 3초 동안 수신 중이라고 뜬다.**
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	bool IsReceivingRadio() const;
 
 	/** 진단용 한 줄 요약. MOU.Voice.Stat 이 쓴다. */
 	FString GetStatsString() const;

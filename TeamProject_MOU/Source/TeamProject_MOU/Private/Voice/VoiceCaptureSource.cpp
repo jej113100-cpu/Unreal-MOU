@@ -61,6 +61,11 @@ bool FVoiceCaptureSource::Start()
 	}
 
 	bReady = true;
+
+	// 직전 세션의 마지막 음량이 남아 있으면 첫마디의 원이 엉뚱한 크기로 시작한다.
+	LoudnessEnvelope = 0.f;
+	CurrentLoudness  = 0.f;
+
 	UE_LOG(LogMOUVoice, Log, TEXT("마이크 캡처 시작 (%d Hz, %d채널, %dms 프레임)."),
 		MOUVoice::SampleRate, MOUVoice::NumChannels, MOUVoice::FrameMs);
 	return true;
@@ -78,6 +83,9 @@ void FVoiceCaptureSource::Shutdown()
 
 	bReady = false;
 	PendingBytes.Reset();
+
+	LoudnessEnvelope = 0.f;
+	CurrentLoudness  = 0.f;
 }
 
 void FVoiceCaptureSource::SetVadThreshold(float InThreshold)
@@ -121,6 +129,19 @@ void FVoiceCaptureSource::DrainPendingSamples(TArray<FMOUVoiceFrame>& OutFrames)
 
 		Frame.Loudness = ComputeRms(Frame.Samples.GetData(), MOUVoice::SamplesPerFrame);
 		CurrentLoudness = Frame.Loudness;
+
+		// --- 음량 엔벨로프 (반경 조절용) -------------------------------------
+		//
+		// 반경을 순간 RMS 로 정하면 음절 사이마다 원이 펄럭인다. 상승은 빠르게,
+		// 하강은 느리게 따라가서 "말하는 동안 유지되는 크기" 를 만든다.
+		//
+		// ★ 진행 폭은 실제 경과 시간이 아니라 **FrameSeconds** 다. 이 루프는
+		//   누적 버퍼를 20ms 씩 잘라내므로 한 틱에 프레임 여러 개가 나오는데,
+		//   거기서 경과 시간을 쓰면 첫 프레임이 시간을 다 먹고 나머지는 0 이
+		//   되어 엔벨로프가 계단이 된다(VoiceTypes.h 의 함수 주석).
+		LoudnessEnvelope = MOUVoice::AdvanceLoudnessEnvelope(
+			LoudnessEnvelope, Frame.Loudness, MOUVoice::FrameSeconds);
+		Frame.LoudnessEnvelope = LoudnessEnvelope;
 
 		// --- VAD: 임계값 + hangover -----------------------------------------
 		// hangover 가 없으면 단어 사이 공백마다 발화가 끊겼다 이어져서

@@ -33,7 +33,7 @@ namespace
 	 * 서버의 라우팅 반경, 디버그 링, V8 의 NPC 소음 반경이 같은 함수를 보고 있어서
 	 * 여기만 다른 값을 쓰면 **화면에 보이는 원과 실제로 들리는 거리가 조용히 어긋난다.**
 	 */
-	FSoundAttenuationSettings MakeProximityAttenuation(EVoiceMode Mode)
+	FSoundAttenuationSettings MakeProximityAttenuation(EVoiceMode Mode, float RadiusScale)
 	{
 		FSoundAttenuationSettings Settings;
 
@@ -43,9 +43,20 @@ namespace
 		// 구형 감쇠. AttenuationShapeExtents.X 가 "음량 100% 를 유지하는 반경" 이고,
 		// FalloffDistance 는 **그 바깥으로 추가되는** 감쇠 구간이다.
 		// 총 가청 거리는 둘의 합이며, VoiceTypes.h 의 static_assert 가 이를 보증한다.
+		//
+		// ★ 음량 배율은 **두 값에 똑같이** 곱한다.
+		//
+		//   한쪽만 곱하면 합(=총 가청 거리)이 GetScaledHearRadius 와 어긋나서,
+		//   디버그 링과 NPC 소음 반경이 가리키는 거리에서 소리가 실제로 0 이
+		//   되지 않는다 - static_assert 가 컴파일 타임에 막아주는 그 어긋남을
+		//   런타임에 다시 만드는 셈이다. 같은 배율이면 비율이 유지되므로
+		//   "가까이서 100% 로 들리는 구간" 도 함께 줄어 자연스럽다.
+		const float Scale = FMath::Clamp(RadiusScale, 0.f, 1.f);
+
 		Settings.AttenuationShape = EAttenuationShape::Sphere;
-		Settings.AttenuationShapeExtents = FVector(MOUVoice::GetAttenuationRadius(Mode), 0.f, 0.f);
-		Settings.FalloffDistance = MOUVoice::GetAttenuationFalloff(Mode);
+		Settings.AttenuationShapeExtents =
+			FVector(MOUVoice::GetAttenuationRadius(Mode) * Scale, 0.f, 0.f);
+		Settings.FalloffDistance = MOUVoice::GetAttenuationFalloff(Mode) * Scale;
 
 		// dB 기반이라 사람 귀에 가장 자연스럽다(7-2절).
 		Settings.DistanceAlgorithm = EAttenuationDistanceModel::NaturalSound;
@@ -74,16 +85,23 @@ namespace
 	}
 }
 
-void UVoiceSynthComponent::SetProximityMode(EVoiceMode Mode)
+void UVoiceSynthComponent::SetProximityMode(EVoiceMode Mode, float RadiusScale)
 {
+	const float ClampedScale = FMath::Clamp(RadiusScale, 0.f, 1.f);
+
 	// 매 프레임 불려도 되도록 조기 반환한다.
 	// 감쇠 갱신은 오디오 스레드로 명령을 보내는 일이라 공짜가 아니다.
-	if (bSpatialConfigured && CurrentMode == Mode)
+	//
+	// ★ 모드는 "같은가" 로, 배율은 "충분히 벌어졌는가" 로 비교한다 - 배율은
+	//   음량을 따라 매 프레임 조금씩 움직이는 연속값이라 완전히 같아지는
+	//   경우가 거의 없다. 여기가 정확히 같은지를 보면 사실상 매번 통과한다.
+	if (bSpatialConfigured && CurrentMode == Mode
+		&& FMath::Abs(CurrentRadiusScale - ClampedScale) < MOUVoice::RadiusScaleUpdateEpsilon)
 	{
 		return;
 	}
 
-	const FSoundAttenuationSettings Settings = MakeProximityAttenuation(Mode);
+	const FSoundAttenuationSettings Settings = MakeProximityAttenuation(Mode, ClampedScale);
 
 	// ★ bAllowSpatialization 은 **사운드를 만들 때** 읽힌다.
 	//   Start() 뒤에 켜도 그 사운드는 끝까지 2D 로 난다. 그래서 첫 호출은
@@ -104,6 +122,7 @@ void UVoiceSynthComponent::SetProximityMode(EVoiceMode Mode)
 	}
 
 	CurrentMode = Mode;
+	CurrentRadiusScale = ClampedScale;
 	bSpatialConfigured = true;
 }
 

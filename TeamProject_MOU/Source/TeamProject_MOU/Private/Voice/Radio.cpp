@@ -155,6 +155,13 @@ void ARadio::SetPowered(bool bOn)
 		return;
 	}
 
+	// 인벤토리의 무전기는 수신 전용이다. UI를 거치지 않는 호출도 이 규칙을
+	// 따라야 하므로, 전원 변경의 공용 진입점에서 막는다.
+	if (!RadioComponent->IsInHand())
+	{
+		return;
+	}
+
 	// 전원 판정은 서버 권위다(RadioComponent.h 의 ★★).
 	// 클라에서 불렸으면 서버로 넘기고, 결과는 복제로 돌아온다.
 	if (HasAuthority())
@@ -169,6 +176,12 @@ void ARadio::SetPowered(bool bOn)
 
 void ARadio::ServerSetPowered_Implementation(bool bOn)
 {
+	// 클라이언트 UI를 우회한 RPC도 서버에서 다시 검증한다.
+	if (!RadioComponent || !RadioComponent->IsInHand())
+	{
+		return;
+	}
+
 	ApplyPoweredOnServer(bOn);
 }
 
@@ -225,9 +238,13 @@ void ARadio::StartTransmit()
 	// 마이크는 각자 자기 컴퓨터에 있다. 서브시스템이 없으면(데디케이티드 서버 등)
 	// 여기서 할 일이 없다.
 	//
-	// 손에 들었는지 / 켜져 있는지는 **여기서 막지 않는다.** 서버가
-	// FindUsableRadioFor 에서 다시 확인하므로, 클라에서 미리 거르면 판정이
-	// 두 군데로 갈라져 어긋나기만 한다.
+	// 인벤토리에서는 수신만 가능하다. 서버 라우터도 다시 확인하지만,
+	// 로컬 송신 요청을 켜지 않아야 UI와 실제 동작이 일치한다.
+	if (!RadioComponent || !RadioComponent->IsInHand() || !RadioComponent->IsPoweredOn())
+	{
+		StopTransmit();
+		return;
+	}
 	if (UVoiceSubsystem* Voice = UVoiceSubsystem::Get(this))
 	{
 		Voice->SetRadioTransmitting(true);

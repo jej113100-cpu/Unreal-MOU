@@ -25,8 +25,19 @@ namespace
 		uint32_t    RoomId = 0;
 		uint64_t    HostUserId = 0;
 		std::string HostName;
-		std::string HostAddress;    // 서버가 TCP 피어에서 읽은 값
-		uint16_t    HostPort = 0;
+		std::vector<HostCandidate> Candidates;   // 호스트에게 가는 길들 (v8). Server.cpp 가 만든다
+
+		/**
+		 * 이 방은 같은 LAN 안에서만 들어올 수 있는가. (v9)
+		 *
+		 * 호스트가 도달성 프로브 결과를 신고하면 켜진다. 서버가 스스로 판정하지 않는다 —
+		 * 패킷이 실제로 도착했는지는 호스트 프로세스 안에서만 관측되기 때문이다.
+		 *
+		 * 기본값이 false 인 이유: 프로브를 못 돌린 경우(구버전 클라, 프로브 실패)에
+		 * 방을 막아버리면 잘 되던 조합까지 못 쓰게 된다. 모르면 예전처럼 둔다.
+		 */
+		bool        bLanOnly = false;
+
 		std::string Title;
 		bool        bHasPassword = false;
 		std::string Password;       // 숫자 4자리. 방과 함께 사라지는 휘발성 값이다
@@ -107,12 +118,13 @@ namespace
 }
 
 ERoomResult Create(uint64_t HostUserId, const std::string& HostName,
-                   const std::string& HostAddress, uint16_t HostPort,
+                   const std::vector<HostCandidate>& Candidates,
+                   bool bLanOnly,
                    const std::string& Title, bool bHasPassword,
                    const std::string& Password, uint8_t MaxPlayers,
                    uint32_t& OutRoomId)
 {
-	if (HostPort == 0 || Title.empty())
+	if (Candidates.empty() || Title.empty())
 	{
 		return ERoomResult::InvalidRequest;
 	}
@@ -138,8 +150,9 @@ ERoomResult Create(uint64_t HostUserId, const std::string& HostName,
 	NewRoom.RoomId       = GNextRoomId++;
 	NewRoom.HostUserId   = HostUserId;
 	NewRoom.HostName     = HostName;
-	NewRoom.HostAddress  = HostAddress;
-	NewRoom.HostPort     = HostPort;
+	NewRoom.Candidates   = Candidates;
+	NewRoom.bLanOnly     = bLanOnly;   // 프로브 결과. 방보다 먼저 올 수 있어 세션이 들고 있다가 여기서 얹는다
+
 	NewRoom.Title        = Title;
 	NewRoom.bHasPassword = bHasPassword;
 	NewRoom.Password     = bHasPassword ? Password : std::string();
@@ -160,7 +173,7 @@ ERoomResult Create(uint64_t HostUserId, const std::string& HostName,
 
 ERoomResult Join(uint32_t RoomId, uint64_t UserId, const std::string& Name,
                  const std::string& Password,
-                 std::string& OutHostAddress, uint16_t& OutHostPort)
+                 std::vector<HostCandidate>& OutCandidates, bool& bOutLanOnly)
 {
 	std::lock_guard<std::mutex> Lock(GMutex);
 
@@ -187,8 +200,8 @@ ERoomResult Join(uint32_t RoomId, uint64_t UserId, const std::string& Name,
 	{
 		if (M.UserId == UserId)
 		{
-			OutHostAddress = R.HostAddress;
-			OutHostPort    = R.HostPort;
+			OutCandidates = R.Candidates;
+			bOutLanOnly   = R.bLanOnly;
 			return ERoomResult::Success;
 		}
 	}
@@ -210,8 +223,9 @@ ERoomResult Join(uint32_t RoomId, uint64_t UserId, const std::string& Name,
 	NewMember.bReady = false;   // 들어오면 준비 안 된 상태로 시작한다
 	R.Members.push_back(std::move(NewMember));
 
-	OutHostAddress = R.HostAddress;
-	OutHostPort    = R.HostPort;
+	OutCandidates = R.Candidates;
+	bOutLanOnly   = R.bLanOnly;
+
 	return ERoomResult::Success;
 }
 
@@ -281,8 +295,78 @@ ERoomResult SetReady(uint64_t UserId, bool bReady, uint32_t& OutRoomId)
 	return ERoomResult::NotInRoom;
 }
 
+void UpdateHostEndpoint(uint64_t HostUserId, const std::string& Address, uint16_t Port)
+{
+	if (Address.empty() || Port == 0)
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> Lock(GMutex);
+
+	Room* R = FindRoomOfMember(HostUserId);
+	if (R == nullptr || R->HostUserId != HostUserId)
+	{
+		return;   // 방장이 아니면 방 주소를 고칠 이유가 없다
+	}
+
+	// ★ 공인 후보를 **덮지 않는다.** 별도 후보로 **추가**한다.
+	//
+	//   [왜 그런가 — 덮었다가 잘 되던 것을 깼다]
+	//     방장이 공유기에 수동 포워딩을 해둔 경우(외부 UDP 7777 -> 그 PC), 공인
+	//     후보 211.244.139.254:7777 은 **이미 동작하는 길**이다. 그런데 관측된
+	//     동적 바인딩 포트(예: 1037)로 덮어버리면 그 포트에는 포워딩이 없어서
+	//     아무도 못 들어온다. 실제로 그렇게 회귀가 났다.
+	//
+	//   두 길은 성격이 다르고 둘 다 유효할 수 있다:
+	//     Public  정적 포워딩/UPnP 로 열린 길. 미요청 인바운드가 통하는 방장용
+	//     Punch   홀펀칭으로 뚫는 길. 정적 인바운드가 막힌 방장용
+	//   어느 것을 쓸지는 받는 쪽이 방의 bLanOnly 를 보고 정한다.
+	for (HostCandidate& C : R->Candidates)
+	{
+		if (C.Kind == static_cast<uint8_t>(EHostAddrKind::Punch))
+		{
+			CopyFixedString(C.Address, kMaxAddressLen, Address);   // 이미 있으면 갱신
+			C.Port = Port;
+			return;
+		}
+	}
+
+	if (R->Candidates.size() < kMaxHostCandidates)
+	{
+		HostCandidate Punch{};
+		CopyFixedString(Punch.Address, kMaxAddressLen, Address);
+		Punch.Port = Port;
+		Punch.Kind = static_cast<uint8_t>(EHostAddrKind::Punch);
+		R->Candidates.push_back(Punch);
+	}
+}
+
+ERoomResult SetReachability(uint64_t HostUserId, bool bReachable, uint32_t& OutRoomId)
+{
+	OutRoomId = 0;
+
+	std::lock_guard<std::mutex> Lock(GMutex);
+
+	Room* R = FindRoomOfMember(HostUserId);
+	if (R == nullptr)
+	{
+		return ERoomResult::NotInRoom;
+	}
+	if (R->HostUserId != HostUserId)
+	{
+		return ERoomResult::NotHost;
+	}
+
+	// 서버가 판정하지 않고 호스트의 신고를 그대로 받는다.
+	// 패킷이 실제로 도착했는지는 호스트 프로세스 안에서만 관측되기 때문이다.
+	R->bLanOnly = !bReachable;
+	OutRoomId   = R->RoomId;
+	return ERoomResult::Success;
+}
+
 ERoomResult StartGame(uint64_t HostUserId, uint32_t& OutRoomId,
-                      std::string& OutHostAddress, uint16_t& OutHostPort,
+                      std::vector<HostCandidate>& OutCandidates, bool& bOutLanOnly,
                       std::vector<uint64_t>& OutNotifyUserIds)
 {
 	OutRoomId = 0;
@@ -312,14 +396,15 @@ ERoomResult StartGame(uint64_t HostUserId, uint32_t& OutRoomId,
 	R->State = ERoomState::InGame;   // 목록에서 사라진다
 
 	OutRoomId      = R->RoomId;
-	OutHostAddress = R->HostAddress;
-	OutHostPort    = R->HostPort;
+	OutCandidates = R->Candidates;
+	bOutLanOnly   = R->bLanOnly;
+
 	CollectMemberIds(*R, /*Except=*/0, OutNotifyUserIds);   // 방장도 포함
 	return ERoomResult::Success;
 }
 
 ERoomResult MarkHostReady(uint64_t HostUserId, uint32_t& OutRoomId,
-                          std::string& OutHostAddress, uint16_t& OutHostPort,
+                          std::vector<HostCandidate>& OutCandidates, bool& bOutLanOnly,
                           std::vector<uint64_t>& OutNotifyUserIds)
 {
 	OutRoomId = 0;
@@ -344,8 +429,9 @@ ERoomResult MarkHostReady(uint64_t HostUserId, uint32_t& OutRoomId,
 	}
 
 	OutRoomId      = R->RoomId;
-	OutHostAddress = R->HostAddress;
-	OutHostPort    = R->HostPort;
+	OutCandidates = R->Candidates;
+	bOutLanOnly   = R->bLanOnly;
+
 
 	// 방장은 뺀다. 이 신호를 보낸 당사자이고, 이미 자기 리슨서버 안에 있다.
 	CollectMemberIds(*R, /*Except=*/HostUserId, OutNotifyUserIds);
@@ -390,6 +476,20 @@ uint32_t FindRoomOf(uint64_t UserId)
 	std::lock_guard<std::mutex> Lock(GMutex);
 	const Room* R = FindRoomOfMember(UserId);
 	return R ? R->RoomId : 0;
+}
+
+bool GetRoomStateOf(uint64_t UserId, ERoomState& OutState)
+{
+	std::lock_guard<std::mutex> Lock(GMutex);
+	const Room* R = FindRoomOfMember(UserId);
+
+	if (R == nullptr)
+	{
+		return false;
+	}
+
+	OutState = R->State;
+	return true;
 }
 
 void ListWaiting(std::vector<RoomInfo>& Out, size_t MaxCount)
