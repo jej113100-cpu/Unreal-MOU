@@ -21,11 +21,31 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual void OnRep_PlayerState() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
+	void UpdateFirstPersonMeshVisibility();
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera")
+	FVector FirstPersonCameraOffset = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera")
+	FRotator FirstPersonCameraRotation = FRotator::ZeroRotator;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Rotation")
+	float AimYawDeadzone = 55.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Rotation")
+	float TurnInPlaceInterpSpeed = 10.0f;
+
 public:
+	// 다른 클라이언트가 이 플레이어의 좌우 에임 회전을 볼 수 있도록 복제
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Animation|Aim")
+	float ReplicatedAimYaw = 0.0f;
+
 	// 상호작용 컴포넌트 반환
 	UFUNCTION(BlueprintCallable, Category = "Components")
 	UInteractionComponent* GetInteractionComponent() const { return InteractionComponent; }
@@ -50,6 +70,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Player|Status")
 	void Knockdown();
 
+	UFUNCTION(Server, Reliable)
+	void ServerKnockdown();
+
+	// 로컬 클라이언트가 AimYaw를 서버로 전송 (다른 클라이언트 AO Yaw 동기화용)
+	UFUNCTION(Server, Unreliable)
+	void ServerSetAimYaw(float NewAimYaw);
+
 	// ---------------------------------------------------------
 	// [그로기 및 사망 (Groggy / Death)]
 	// ---------------------------------------------------------
@@ -57,6 +84,10 @@ public:
 	// 현재 다운 횟수 (1이면 그로기, 2면 사망)
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Player|Status")
 	int32 DownCount = 0;
+
+	// 이번 레벨에서 실제 넉다운 상태에 진입한 누적 횟수입니다.
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Player|Status")
+	int32 KnockdownCount = 0;
 
 	// 현재 그로기 상태인지 여부
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Player|Status")
@@ -69,21 +100,6 @@ public:
 	// 부활 중(일어나는 중) 상태인지 여부 (입력 차단용)
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Player|Status")
 	bool bIsReviving = false;
-
-	// ---------------------------------------------------------
-	// [타입별 표정 변화 인덱스 (블루프린트에서 쉽게 변경 가능)]
-	// ---------------------------------------------------------
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Emotions")
-	int32 EmotionIndex_Normal = 0; // 평상시 기본 표정
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Emotions")
-	int32 EmotionIndex_HeavyPackage = 1; // 무거운 택배를 들었을 때
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Emotions")
-	int32 EmotionIndex_Pushing = 2; // 물건을 밀 때
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Emotions")
-	int32 EmotionIndex_CarryCharacter = 3; // 죽은 캐릭터를 들었을 때
 
 	// 체력이 0이 되었을 때 AttributeSet에서 호출할 함수
 	UFUNCTION(BlueprintCallable, Category = "Player|Status")
@@ -139,9 +155,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Player|Revive", meta = (ClampMin = "0.1", UIMin = "0.1"))
 	float RequiredReviveTime = 3.0f;
 
-	// 현재 부활 차징 중인지 여부
-	UPROPERTY(BlueprintReadOnly, Category = "Player|Revive")
+	// 현재 부활 차징 중인지 여부 (네트워크 리플리케이션)
+	UPROPERTY(ReplicatedUsing = OnRep_IsHoldingRevive, BlueprintReadOnly, Category = "Player|Revive")
 	bool bIsHoldingRevive = false;
+
+	UFUNCTION()
+	void OnRep_IsHoldingRevive();
 
 	// 현재 누적된 차징 시간 (초)
 	UPROPERTY(BlueprintReadOnly, Category = "Player|Revive")
@@ -163,6 +182,18 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Player|Revive")
 	void OnReviveTargetAimChanged(bool bIsAiming, AMainCharacter* TargetCharacter);
 
+	// 현재 에임(조준점) 또는 근접 반경에 아이템이 들어와 있는지 여부
+	UPROPERTY(BlueprintReadOnly, Category = "Player|UI")
+	bool bIsAimingAtItem = false;
+
+	// 현재 에임하고 있는 아이템
+	UPROPERTY(BlueprintReadOnly, Category = "Player|UI")
+	TObjectPtr<AItemBase> FocusedItem;
+
+	// 에임(조준점)에 아이템이 들어오거나 나갈 때 호출되는 이벤트 (화면 중앙 UI 띄우기용 - Revive UI와 동일 방식)
+	UFUNCTION(BlueprintImplementableEvent, Category = "Player|UI")
+	void OnItemAimChanged(bool bIsAiming, AItemBase* TargetItem);
+
 	// 부활 완료에 필요한 총 시간 반환 (GA_Revive의 ReviveDuration이 설정되어 있다면 우선 적용)
 	UFUNCTION(BlueprintPure, Category = "Player|Revive")
 	float GetRequiredReviveTime() const;
@@ -182,6 +213,14 @@ public:
 	// 부활 차징 취소 (키 뗌, 피격, 거리 벗어남 등)
 	UFUNCTION(BlueprintCallable, Category = "Player|Revive")
 	void CancelReviveHold();
+
+	// 클라이언트에서 서버로 부활 차징 시작 요청
+	UFUNCTION(Server, Reliable)
+	void ServerStartReviveHold(AMainCharacter* Target);
+
+	// 클라이언트에서 서버로 부활 차징 취소 요청
+	UFUNCTION(Server, Reliable)
+	void ServerCancelReviveHold();
 
 	// 부활 차징 완료 (실제 부활 트리거)
 	UFUNCTION(BlueprintCallable, Category = "Player|Revive")
@@ -254,20 +293,30 @@ public:
 	FVector LastCharacterLocation;
 
 	// 밀기 진입 시 고정되는 방향
-	UPROPERTY(BlueprintReadOnly, Category = "Player|Push")
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Player|Push")
 	FVector LockedPushDirection;
 
-	// 원래 회전 허용 옵션 저장용
-	bool bOriginalOrientRotation = true;
+	// 밀기 시작 시 상자 중심과의 초기 수평 거리 (메쉬 관통 방지용 클램프 기준)
+	UPROPERTY(BlueprintReadOnly, Category = "Player|Push")
+	float PushInitialDistToBox = 0.0f;
+
+	// 밀기 시작 시 상자 로컬 공간 기준 손 접촉 앵커 위치 (거리 이탈 감지 기준)
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Player|Push")
+	FVector PushLocalAnchor = FVector::ZeroVector;
 
 	// ---------------------------------------------------------
 	// [이동 조작 오버라이드] - ACharacterBase 상태 판정 연동
 	// ---------------------------------------------------------
 
 	virtual void DoMove(float Right, float Forward) override;
+	virtual void DoLook(float Yaw, float Pitch) override;
 	virtual void DoJumpStart() override;
 	virtual bool CanAct() const override;
 	virtual bool CanMove() const override;
+
+	// 밀기 모드 중 카메라 회전 허용 각도 (에임오프셋 범위와 일치, 기본 ±70도)
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Pushing")
+	float PushCameraYawLimit = 70.0f;
 
 protected:
 	// 상호작용 탐색 컴포넌트 (F키)
@@ -325,6 +374,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Player|Abilities")
 	TSubclassOf<class UGA_Death> DeathAbilityClass;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Player|Abilities")
+	TSubclassOf<class UGA_Knockdown> KnockdownAbilityClass;
+
 	UPROPERTY(Transient)
 	FGameplayAbilitySpecHandle SprintAbilitySpecHandle;
 
@@ -351,6 +403,9 @@ public:
 
 	UPROPERTY(Transient)
 	FGameplayAbilitySpecHandle DeathAbilitySpecHandle;
+
+	UPROPERTY(Transient)
+	FGameplayAbilitySpecHandle KnockdownAbilitySpecHandle;
 
 protected:
 	virtual void HandleHealthChanged(const struct FOnAttributeChangeData& Data) override;
@@ -463,7 +518,7 @@ protected:
 
 	// 감정 인덱스를 변경하는 머티리얼 파라미터 이름 (머티리얼에 적힌 이름과 정확히 일치해야 함)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emote")
-	FName EmotionParameterName = FName("Emotion index"); 
+	FName EmotionParameterName = FName("Emotion index");
 
 	// 감정 색상을 변경하는 머티리얼 파라미터 이름
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emote")
@@ -487,6 +542,16 @@ public:
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastPlayEmote(class UAnimMontage* EmoteMontage, int32 EmotionIndex, FLinearColor EmoteColor);
+
+	// 재생 중인 이모트 몽타주를 즉시 중단하고 모든 플레이어에게 동기화합니다.
+	UFUNCTION(BlueprintCallable, Category = "Emote")
+	void StopEmote();
+
+	UFUNCTION(Server, Reliable)
+	void ServerStopEmote();
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastStopEmote();
 
 	// 표정 정보만 강제로 바꾸고 복제하는 함수 (애니메이션 몽타주 없이 표정만 바꿀 때 유용함)
 	UFUNCTION(BlueprintCallable, Category = "Emote")
@@ -550,6 +615,9 @@ private:
 	void OnSlot2();
 	void OnSlot3();
 
+	// 손에 든 무기가 "사용 중"이면 true (사용 중엔 슬롯 변경 차단). [WEAPON-016]
+	bool IsHandWeaponInUse() const;
+
 	// 인벤토리 장착 요청 콜백
 	UFUNCTION()
 	void OnEquipRequested(AItemBase* ItemToEquip);
@@ -583,22 +651,20 @@ private:
 	// [기절 / 넉다운 (Stun / Knockdown)]
 	// ---------------------------------------------------------
 
-protected:
-	// 넉다운 시 재생할 몽타주 (에디터에서 할당 필요)
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Player|Animation")
-	TObjectPtr<class UAnimMontage> KnockdownMontage;
-
+public:
 	// 현재 기절(Stun) 상태 여부 (이동/행동 불가)
-	UPROPERTY(Replicated)
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Player|Status")
 	bool bIsStunned = false;
 
-	// 클라이언트 동기화용 멀티캐스트
+	UFUNCTION(BlueprintCallable, Category = "Player|Status")
+	void SetIsStunned(bool bNewStunned) { bIsStunned = bNewStunned; }
+
+public:
+	// 피격/가벼운 충격 시 표정 반응 재생 (서버/로컬 호출 지원)
+	UFUNCTION(BlueprintCallable, Category = "Player|Status")
+	void PlayHitReaction(float Duration = 0.5f);
+
+protected:
 	UFUNCTION(NetMulticast, Reliable)
-	void MulticastKnockdown();
-
-	// 넉다운 종료 콜백
-	void OnKnockdownEnd();
-
-	// 넉다운 복구 타이머
-	FTimerHandle KnockdownTimerHandle;
+	void MulticastPlayHitReaction(float Duration);
 };

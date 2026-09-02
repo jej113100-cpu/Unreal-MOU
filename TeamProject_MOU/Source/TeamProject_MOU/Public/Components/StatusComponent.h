@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameplayAbilitySpecHandle.h"
 #include "GameplayTagContainer.h"
 #include "StatusEffect/StatusEffectDataAsset.h"
@@ -110,6 +111,10 @@ private:
 	void HandleMovementBlockingCCTagChanged(FGameplayTag ChangedTag, int32 NewCount);
 	void RefreshCrowdControlledBlackboard();
 	void CancelAbilitiesBlockedByCrowdControl();
+	void ApplyMovementBlockedState(bool bShouldBlockMovement);
 
 	bool bWasMovementBlockedByCC = false;
+	bool bMovementModeOverriddenByCC = false;
+	TEnumAsByte<EMovementMode> PreviousMovementMode = MOVE_Walking;
+	uint8 PreviousCustomMovementMode = 0;
 };

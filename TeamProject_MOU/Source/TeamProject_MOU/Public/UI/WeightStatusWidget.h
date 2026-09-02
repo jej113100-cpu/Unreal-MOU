@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "Data/CharacterVisualDataAsset.h"
 #include "WeightStatusWidget.generated.h"
 
 class UImage;
@@ -9,19 +10,6 @@ class UProgressBar;
 class UTextBlock;
 class UTexture2D;
 class UMaterialInstanceDynamic;
-
-/**
- * 5단계 무게 등급 (0~25%, 25~50%, 50~75%, 75~100%, 100%~)
- */
-UENUM(BlueprintType)
-enum class EWeightGrade : uint8
-{
-	Light		UMETA(DisplayName = "가벼움 (0~25%)"),
-	Normal		UMETA(DisplayName = "적당 (25~50%)"),
-	Heavy		UMETA(DisplayName = "무거움 (50~75%)"),
-	Overload	UMETA(DisplayName = "초과 (75~100%)"),
-	Critical	UMETA(DisplayName = "초과 2 (100%~)")
-};
 
 /**
  * UWeightStatusWidget
@@ -76,7 +64,7 @@ protected:
 	TObjectPtr<UTextBlock> Text_WeightPercent;
 
 	// ---------------------------------------------------------
-	// [5단계 로봇 표정 텍스처 (블루프린트 디테일창에서 할당)]
+	// [7단계 로봇 표정 텍스처 (블루프린트 디테일창에서 할당)]
 	// ---------------------------------------------------------
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Portrait")
@@ -86,16 +74,22 @@ protected:
 	TObjectPtr<UTexture2D> Tex_Face_Normal;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Portrait")
+	TObjectPtr<UTexture2D> Tex_Face_SlightlyHeavy;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Portrait")
 	TObjectPtr<UTexture2D> Tex_Face_Heavy;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Portrait")
-	TObjectPtr<UTexture2D> Tex_Face_Overload;
+	TObjectPtr<UTexture2D> Tex_Face_Overload1;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Portrait")
-	TObjectPtr<UTexture2D> Tex_Face_Critical;
+	TObjectPtr<UTexture2D> Tex_Face_Overload2;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Portrait")
+	TObjectPtr<UTexture2D> Tex_Face_Overload3;
 
 	// ---------------------------------------------------------
-	// [5단계 색상 설정 (기본값 설정됨, 에디터에서 변경 가능)]
+	// [7단계 색상 설정 (기본값 설정됨, 에디터에서 변경 가능)]
 	// ---------------------------------------------------------
 
 	// 가벼움: 하늘색 (0~25%)
@@ -106,17 +100,25 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Color")
 	FLinearColor Color_Normal = FLinearColor(0.33f, 1.0f, 0.27f, 1.0f);
 
-	// 무거움: 옐로우/골드 (50~75%)
+	// 조금 무거움: 옐로우/골드 (50~75%)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Color")
-	FLinearColor Color_Heavy = FLinearColor(1.0f, 0.72f, 0.0f, 1.0f);
+	FLinearColor Color_SlightlyHeavy = FLinearColor(1.0f, 0.85f, 0.0f, 1.0f);
 
-	// 초과: 핑크/마젠타 (75~100%)
+	// 무거움: 주황 (75~100%)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Color")
-	FLinearColor Color_Overload = FLinearColor(1.0f, 0.2f, 0.47f, 1.0f);
+	FLinearColor Color_Heavy = FLinearColor(1.0f, 0.55f, 0.0f, 1.0f);
 
-	// 초과 2: 강렬한 레드 (100%~)
+	// 초과 1: 핑크/마젠타 (100~130%)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Color")
-	FLinearColor Color_Critical = FLinearColor(1.0f, 0.07f, 0.07f, 1.0f);
+	FLinearColor Color_Overload1 = FLinearColor(1.0f, 0.2f, 0.47f, 1.0f);
+
+	// 초과 2: 다홍/레드 (130~150%)
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Color")
+	FLinearColor Color_Overload2 = FLinearColor(1.0f, 0.1f, 0.1f, 1.0f);
+
+	// 초과 3: 강렬한 레드 (150%~)
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI|Weight|Color")
+	FLinearColor Color_Overload3 = FLinearColor(1.0f, 0.0f, 0.0f, 1.0f);
 
 	// ---------------------------------------------------------
 	// [보간 및 애니메이션 파라미터]

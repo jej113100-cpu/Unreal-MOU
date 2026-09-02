@@ -166,7 +166,12 @@ void UVoiceRouter::RouteFrame(APlayerController* SenderPC, const FVoiceFrame& Fr
 	// 무전 수신 소음(무전기 스피커)은 여기가 아니라 RouteRadio 안에서 쏜다.
 	// 위치가 발화자가 아니라 **무전기 액터**라서, 무전기를 순회하는 그쪽이
 	// 자연스럽다. 바닥에 떨어진 무전기도 거기서 같이 처리된다.
-	ReportSpeakerNoise(SenderPawn, SpeakerId, Mode, bRadioAllowed, Now);
+	//
+	// ★ 음량이 반경에 반영되는 지점이다. 클라가 보낸 정규화 강도를 그대로
+	//   넘긴다 - 클라 감쇠와 **같은 값에서** 반경이 나와야 "화면의 원 = 사람이
+	//   듣는 거리 = NPC 가 듣는 거리" 의 비율이 유지된다(VoiceTypes.h).
+	ReportSpeakerNoise(SenderPawn, SpeakerId, Mode,
+		MOUVoice::DequantizeLoudness(Frame.Loudness), bRadioAllowed, Now);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +179,7 @@ void UVoiceRouter::RouteFrame(APlayerController* SenderPC, const FVoiceFrame& Fr
 // ---------------------------------------------------------------------------
 
 void UVoiceRouter::ReportSpeakerNoise(const APawn* SenderPawn, int32 SpeakerId,
-	EVoiceMode Mode, bool bOnRadio, double Now)
+	EVoiceMode Mode, float Intensity01, bool bOnRadio, double Now)
 {
 	UWorld* World = GetWorld();
 
@@ -201,7 +206,11 @@ void UVoiceRouter::ReportSpeakerNoise(const APawn* SenderPawn, int32 SpeakerId,
 	//
 	// ★ 숫자를 여기 적으면 안 된다. MOUVoice:: 함수 하나에서만 나와야
 	//   디버그 링(MOU.Voice.ShowRadius)과 실제 판정이 어긋나지 않는다.
-	float NoiseRange = MOUVoice::GetNoiseRange(Mode);
+	//
+	// ★ 모드가 상한을 정하고, **실제로 얼마나 크게 말했는지가 그 아래로
+	//   반경을 줄인다**(아날로그). 조용히 말하면 NPC 도 가까이서만 듣는다.
+	//   클라 감쇠가 같은 함수·같은 강도를 쓰므로 사람 반경과 비율이 유지된다.
+	float NoiseRange = MOUVoice::GetScaledNoiseRange(Mode, Intensity01);
 
 	// 무전을 치는 중이면 무전기에 대고 낮게 말하므로 육성이 덜 퍼진다(7-5절).
 	if (bOnRadio)

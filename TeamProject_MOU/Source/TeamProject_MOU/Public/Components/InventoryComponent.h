@@ -47,4 +47,8 @@ public:
 	// 캐릭터에게 특정 아이템 장착을 요청하는 델리게이트
 	UPROPERTY(BlueprintAssignable, Category = "Inventory|Action")
 	FOnEquipRequested OnEquipRequested;
+
+private:
+	int32 InventoryRestoreAttempts = 0;
+	void TryRestoreSavedInventory();
 };

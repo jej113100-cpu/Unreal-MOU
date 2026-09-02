@@ -13,7 +13,7 @@
 //
 // [★★ 왜 워커 스레드가 아닌가 - 설계가 바뀐 이유]
 //
-//   처음에는 기존 채팅(FChatClientRunnable)처럼 워커 스레드로 만들었다가 되돌렸다.
+//   처음에는 기존 채팅(FServerClientRunnable)처럼 워커 스레드로 만들었다가 되돌렸다.
 //   엔진 구현을 열어보니 그렇게 하면 안 되는 구조였다:
 //
 //     class FVoiceCaptureWindows : public IVoiceCapture, public FTSTickerObjectBase
@@ -64,8 +64,22 @@ struct FMOUVoiceFrame
 	/** 16kHz 모노 PCM16. 항상 MOUVoice::SamplesPerFrame 개다. */
 	TArray<int16> Samples;
 
-	/** 이 프레임의 RMS 를 0~1 로 정규화한 값. NPC 소음 크기와 UI 게이지에 쓴다. */
+	/**
+	 * 이 프레임의 RMS 를 0~1 로 정규화한 값. **순간값이다.**
+	 *
+	 * VAD 판정과 마이크 게이지가 쓴다 - 둘 다 반응이 빨라야 하는 쪽이다.
+	 * **반경 계산에는 쓰지 않는다**(아래 LoudnessEnvelope 참고).
+	 */
 	float Loudness = 0.f;
+
+	/**
+	 * 스무딩을 통과한 음량. **반경 계산에는 이 값을 쓴다.**
+	 *
+	 * ★ 순간 RMS 를 반경에 그대로 넣으면 음절 사이 공백마다 원이 펄럭인다 -
+	 *   아날로그로 만든 이유가 사라진다(VoiceTypes.h 의 LoudnessReleaseSeconds
+	 *   주석). 게이지와 VAD 는 위의 Loudness 를, 반경은 이쪽을 쓴다.
+	 */
+	float LoudnessEnvelope = 0.f;
 
 	/** VAD 판정 결과. false 면 무음 구간이다. */
 	bool bIsSpeaking = false;
@@ -109,8 +123,16 @@ public:
 	void  SetVadThreshold(float InThreshold);
 	float GetVadThreshold() const { return VadThreshold; }
 
-	/** 마지막으로 계산한 음량. UI 게이지용. */
+	/** 마지막으로 계산한 순간 음량. UI 게이지용. */
 	float GetCurrentLoudness() const { return CurrentLoudness; }
+
+	/**
+	 * 스무딩을 통과한 마지막 음량. **반경 계산과 디버그 링이 쓴다.**
+	 *
+	 * 정규화까지 거친 값이 필요하면 MOUVoice::NormalizeLoudness 에 이 값과
+	 * GetVadThreshold() 를 넣는다 - 그 조합이 네트워크로 나가는 값이다.
+	 */
+	float GetLoudnessEnvelope() const { return LoudnessEnvelope; }
 
 private:
 	/** 누적 버퍼에서 20ms 씩 잘라낸다. */
@@ -130,6 +152,14 @@ private:
 	bool  bReady          = false;
 	float VadThreshold    = MOUVoice::DefaultVadThreshold;
 	float CurrentLoudness = 0.f;
+
+	/**
+	 * 음량 엔벨로프 상태. 프레임마다 한 스텝씩 진행한다.
+	 *
+	 * 마이크를 열고 닫을 때 0 으로 되돌린다 - 안 그러면 마이크를 다시 열었을 때
+	 * **직전 세션의 마지막 음량에서 시작해 첫마디의 원이 엉뚱한 크기로 나온다.**
+	 */
+	float LoudnessEnvelope = 0.f;
 
 	/** VAD hangover 상태. */
 	double SilenceStartedAt = 0.0;

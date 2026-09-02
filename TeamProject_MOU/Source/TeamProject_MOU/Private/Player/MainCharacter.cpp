@@ -2,14 +2,19 @@
 #include "Components/InteractionComponent.h"
 #include "Components/CarryingComponent.h"
 #include "Components/StatusComponent.h"
+#include "Components/CharacterVisualComponent.h"
+#include "Data/CharacterVisualDataAsset.h"
 #include "Base/BaseAttributeSet.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Camera/CameraComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Base/ItemBase.h"
+#include "Item/WeaponItemBase.h"
 #include "Base/PackageBase.h"
 #include "Base/EventObjectBase.h"
 #include "Components/InventoryComponent.h"
@@ -30,6 +35,7 @@
 #include "Ability/GA_Interact.h"
 #include "Ability/GA_Groggy.h"
 #include "Ability/GA_Death.h"
+#include "Ability/GA_Knockdown.h"
 
 AMainCharacter::AMainCharacter()
 {
@@ -58,38 +64,46 @@ AMainCharacter::AMainCharacter()
 
 	// 시야(상호작용) Trace가 캐릭터를 인식할 수 있도록 Visibility 채널 Block 처리
 	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationYaw = true;
+	bUseControllerRotationRoll = false;
+
+	if (GetCharacterMovement())
+	{
+		GetCharacterMovement()->bOrientRotationToMovement = false;
+	}
+
+	// CameraBoom은 베이스 클래스 소유라 삭제 불가 → 완전히 비활성화
+	if (GetCameraBoom())
+	{
+		GetCameraBoom()->TargetArmLength = 0.0f;
+		GetCameraBoom()->bDoCollisionTest = false;
+		GetCameraBoom()->bUsePawnControlRotation = false;
+	}
+
+	// FollowCamera를 head 소켓에 직접 부착 (1인칭: CameraBoom 불필요)
+	if (GetFollowCamera() && GetMesh())
+	{
+		GetFollowCamera()->SetupAttachment(GetMesh(), FName("head"));
+		GetFollowCamera()->SetRelativeLocation(FirstPersonCameraOffset);
+		GetFollowCamera()->SetRelativeRotation(FirstPersonCameraRotation);
+		GetFollowCamera()->bUsePawnControlRotation = true;
+		GetFollowCamera()->SetFieldOfView(90.0f);
+	}
 }
 
 void AMainCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 눈(얼굴)과 입 메시에 적용된 동적 머티리얼 인스턴스(DMI) 생성 및 캐싱
-	TArray<UStaticMeshComponent*> StaticMeshes;
-	GetComponents<UStaticMeshComponent>(StaticMeshes);
-	for (UStaticMeshComponent* SM : StaticMeshes)
-	{
-		// 블루프린트에서 만든 컴포넌트 이름에 'Eye' 또는 'Mouth'가 포함되어 있는지 확인
-		if (SM->GetName().Contains(TEXT("Eye")) || SM->GetName().Contains(TEXT("Mouth")))
-		{
-			if (UMaterialInstanceDynamic* DMI = SM->CreateAndSetMaterialInstanceDynamic(0))
-			{
-				FaceMaterialInstances.Add(DMI);
-			}
-		}
-	}
+	UpdateFirstPersonMeshVisibility();
 
-	// 캐릭터 몸체 메시의 모든 머티리얼 슬롯에서 DMI 생성 및 캐싱 (Emission 제어용)
-	if (USkeletalMeshComponent* SkelMesh = GetMesh())
+	// 비주얼 컴포넌트에서 생성된 동적 머티리얼 인스턴스(DMI) 동기화
+	if (VisualComponent)
 	{
-		int32 MatCount = SkelMesh->GetNumMaterials();
-		for (int32 i = 0; i < MatCount; ++i)
-		{
-			if (UMaterialInstanceDynamic* DMI = SkelMesh->CreateAndSetMaterialInstanceDynamic(i))
-			{
-				BodyMaterialInstances.Add(DMI);
-			}
-		}
+		FaceMaterialInstances = VisualComponent->GetFaceMaterialInstances();
+		BodyMaterialInstances = VisualComponent->GetBodyMaterialInstances();
 	}
 
 	// 초기 발광 상태 적용
@@ -134,6 +148,112 @@ void AMainCharacter::BeginPlay()
 
 		TSubclassOf<UGameplayAbility> DeathClass = DeathAbilityClass ? DeathAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Death::StaticClass());
 		DeathAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(DeathClass, 1));
+
+		TSubclassOf<UGameplayAbility> KnockdownClass = KnockdownAbilityClass ? KnockdownAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Knockdown::StaticClass());
+		KnockdownAbilitySpecHandle = AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(KnockdownClass, 1));
+	}
+
+	if (USkeletalMeshComponent* SkelMesh = GetMesh())
+	{
+		SkelMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	}
+
+	if (GetFollowCamera() && GetMesh())
+	{
+		if (GetFollowCamera()->GetAttachParent() != GetMesh() || GetFollowCamera()->GetAttachSocketName() != FName("head"))
+		{
+			GetFollowCamera()->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName("head"));
+			if (!FirstPersonCameraOffset.IsNearlyZero())
+			{
+				GetFollowCamera()->SetRelativeLocation(FirstPersonCameraOffset);
+			}
+			if (!FirstPersonCameraRotation.IsNearlyZero())
+			{
+				GetFollowCamera()->SetRelativeRotation(FirstPersonCameraRotation);
+			}
+		}
+		else
+		{
+			if (!FirstPersonCameraOffset.IsNearlyZero())
+			{
+				GetFollowCamera()->SetRelativeLocation(FirstPersonCameraOffset);
+			}
+			if (!FirstPersonCameraRotation.IsNearlyZero())
+			{
+				GetFollowCamera()->SetRelativeRotation(FirstPersonCameraRotation);
+			}
+		}
+	}
+}
+
+void AMainCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+	UpdateFirstPersonMeshVisibility();
+}
+
+void AMainCharacter::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+	UpdateFirstPersonMeshVisibility();
+}
+
+void AMainCharacter::UpdateFirstPersonMeshVisibility()
+{
+	if (IsLocallyControlled())
+	{
+		if (USkeletalMeshComponent* SkelMesh = GetMesh())
+		{
+			SkelMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+			SkelMesh->HideBoneByName(FName("neck"), PBO_None);
+			SkelMesh->bCastHiddenShadow = true;
+		}
+
+		if (GetFollowCamera() && GetMesh())
+		{
+			if (GetFollowCamera()->GetAttachParent() != GetMesh() || GetFollowCamera()->GetAttachSocketName() != FName("head"))
+			{
+				GetFollowCamera()->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName("head"));
+				if (!FirstPersonCameraOffset.IsNearlyZero())
+				{
+					GetFollowCamera()->SetRelativeLocation(FirstPersonCameraOffset);
+				}
+				if (!FirstPersonCameraRotation.IsNearlyZero())
+				{
+					GetFollowCamera()->SetRelativeRotation(FirstPersonCameraRotation);
+				}
+			}
+			else
+			{
+				if (!FirstPersonCameraOffset.IsNearlyZero())
+				{
+					GetFollowCamera()->SetRelativeLocation(FirstPersonCameraOffset);
+				}
+				if (!FirstPersonCameraRotation.IsNearlyZero())
+				{
+					GetFollowCamera()->SetRelativeRotation(FirstPersonCameraRotation);
+				}
+			}
+		}
+
+		TArray<UStaticMeshComponent*> StaticMeshes;
+		GetComponents<UStaticMeshComponent>(StaticMeshes);
+		for (UStaticMeshComponent* SM : StaticMeshes)
+		{
+			if (SM && (SM->GetName().Contains(TEXT("Eye")) || SM->GetName().Contains(TEXT("Mouth"))))
+			{
+				SM->SetOwnerNoSee(true);
+			}
+		}
+
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			if (PC->PlayerCameraManager)
+			{
+				PC->PlayerCameraManager->ViewPitchMin = -70.0f;
+				PC->PlayerCameraManager->ViewPitchMax = 70.0f;
+			}
+		}
 	}
 }
 
@@ -145,6 +265,22 @@ void AMainCharacter::Tick(float DeltaTime)
 	if (bIsSprinting && GetCharacterMovement() && GetCharacterMovement()->GetCurrentAcceleration().IsNearlyZero())
 	{
 		StopSprinting();
+	}
+
+	// [밀기 모드 입력 해제 감지] 키를 떼어 가속이 멈춘 경우 CurrentPushInput을 즉시 0으로 리셋 (상자 미끄러짐/밀림 방지)
+	if (IsLocallyControlled() && bIsPushingMode)
+	{
+		if (GetCharacterMovement() && GetCharacterMovement()->GetCurrentAcceleration().IsNearlyZero())
+		{
+			if (!FMath::IsNearlyZero(CurrentPushInput))
+			{
+				CurrentPushInput = 0.0f;
+				if (!HasAuthority())
+				{
+					ServerSetPushInput(0.0f);
+				}
+			}
+		}
 	}
 
 	// 매 프레임 스태미나 소모 및 회복 처리
@@ -197,138 +333,161 @@ void AMainCharacter::Tick(float DeltaTime)
 		}
 	}
 
-	// [밀기 모드] 캐릭터의 실제 이동량만큼 이벤트 오브젝트를 함께 이동시킴
-	// Simulated Proxy(다른 클라이언트 화면에 보이는 타 플레이어)는 서버의 복제를 따라가므로 이 로직을 실행하지 않음
+	// [밀기 모드] 거리 이탈 검사 및 상자 메쉬 관통 방지 클램프
+	// 상자 이동 자체는 EventObjectBase::Tick(서버)에서 중앙 제어하므로, 캐릭터는 클램프와 이탈만 담당
+	// (시뮬레이트 프록시는 서버의 위치 복제를 그대로 따르므로 프록시에서 StopPushMode가 오작동하지 않도록 제한)
 	if (bIsPushingMode && CurrentPushedObject && (IsLocallyControlled() || HasAuthority()))
 	{
-		FVector CurrentLoc = GetActorLocation();
-		FVector DeltaMove = CurrentLoc - LastCharacterLocation;
-		DeltaMove.Z = 0.0f; // 상하 이동은 무시
-
-		bool bCanMove = true;
 		AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject);
-		if (EventObj)
-		{
-			bCanMove = EventObj->IsReadyToMove();
-		}
 
-		if (!bCanMove)
+		// 1. 손 앵커 포인트 기준 거리 이탈 검사 (상자가 이동하면서 원래 잡았던 손 위치에서 110cm 이상 멀어지면 자동 밀기 해제)
+		FVector WorldAnchor = CurrentPushedObject->GetActorTransform().TransformPosition(PushLocalAnchor);
+		float Dist2D = FVector::Dist2D(GetActorLocation(), WorldAnchor);
+		float DetachLimit = EventObj ? EventObj->PushDetachDistance : 110.0f;
+		if (Dist2D > DetachLimit)
 		{
-			if (!DeltaMove.IsNearlyZero())
-			{
-				// 인원 부족 또는 입력 불일치: 애니메이션은 나오지만 캐릭터의 실제 위치는 이전으로 강제 고정
-				SetActorLocation(LastCharacterLocation, false);
-			}
+			StopPushMode();
 			return;
 		}
 
-		if (bCanMove && !DeltaMove.IsNearlyZero())
+		FVector CurrentLoc = GetActorLocation();
+
+		// 2. 상자가 이동 불가능한 상태(인원 부족/입력 불일치 등)일 때 캐릭터가 앞으로 나아가지 못하도록 이전 위치로 고정
+		bool bCanMove = EventObj ? EventObj->IsReadyToMove() : false;
+		if (!bCanMove)
 		{
-			// 협동 밀기 시 여러 명이 동시에 상자 위치를 중복 적용(2배속/N배속 가속)하지 않도록,
-			// 첫 번째 푸셔(또는 단독 푸셔)만 상자를 이동시키고 낭떠러지 추락을 검사함
-			bool bIsPrimaryPusher = true;
-			if (EventObj && EventObj->CurrentPushers.Num() > 0)
-			{
-				bIsPrimaryPusher = (EventObj->CurrentPushers[0] == this);
-			}
-
-			if (bIsPrimaryPusher)
-			{
-				// 0. 장애물(다른 상자나 벽) 감지 (바닥/경사면은 무시)
-				FVector BoxCenter, BoxExtents;
-				CurrentPushedObject->GetActorBounds(false, BoxCenter, BoxExtents);
-				
-				// 바닥 긁힘 방지를 위해 살짝 위(10cm)에서 전방으로 검사
-				FVector TraceStart = BoxCenter + FVector(0, 0, 10.0f);
-				FVector TraceEnd = TraceStart + DeltaMove;
-				
-				FCollisionQueryParams BoxParams;
-				BoxParams.AddIgnoredActor(CurrentPushedObject);
-				BoxParams.AddIgnoredActor(this);
-				
-				FHitResult BoxHit;
-				// 상자보다 아주 살짝 작은 크기의 박스로 Sweep
-				bool bHitObstacle = GetWorld()->SweepSingleByChannel(
-					BoxHit, TraceStart, TraceEnd, 
-					CurrentPushedObject->GetActorQuat(), ECC_Visibility, 
-					FCollisionShape::MakeBox(BoxExtents * 0.95f), BoxParams);
-					
-				// 수직 장애물에 부딪혔을 때만 멈춤 (경사면 무시)
-				if (bHitObstacle && FMath::Abs(BoxHit.ImpactNormal.Z) < 0.5f)
-				{
-					// 전방에 벽이나 다른 상자가 있으므로 캐릭터의 이동 취소
-					SetActorLocation(LastCharacterLocation, false);
-					return;
-				}
-
-				// 1. 경사면 이동 완벽 허용을 위해 Sweep 끄고 이동 적용 (장애물은 위에서 걸러냄)
-				CurrentPushedObject->AddActorWorldOffset(DeltaMove, false);
-
-				// 2. 바닥 감지 (낭떠러지 체크)
-				FVector TraceStartFall = BoxCenter;
-				FVector TraceEndFall = TraceStartFall - FVector(0, 0, BoxExtents.Z + 50.0f); // 상자 바닥에서 50cm 아래 검사
-				FHitResult FallHit;
-				FCollisionQueryParams FallParams;
-				FallParams.AddIgnoredActor(CurrentPushedObject);
-				FallParams.AddIgnoredActor(this);
-
-				bool bHitFall = GetWorld()->LineTraceSingleByChannel(FallHit, TraceStartFall, TraceEndFall, ECC_Visibility, FallParams);
-				if (!bHitFall)
-				{
-					// 바닥이 없으면 추락 처리 (서버에서만 판정하여 모두에게 동기화)
-					if (HasAuthority())
-					{
-						EventObj->MulticastFallOffLedge();
-					}
-				}
-			}
-
-			LastCharacterLocation = CurrentLoc;
+			SetActorLocation(LastCharacterLocation, false);
+			CurrentLoc = LastCharacterLocation;
 		}
 		else
 		{
-			LastCharacterLocation = CurrentLoc;
+			// [단방향 메쉬 파고들기 차단] 캐릭터가 상자 중심 방향으로 파고들었을 때만 상자 표면 쪽으로 밀어냄 (상자가 멀어질 때는 절대 끌어당기지 않음)
+			FVector BoxCenter = CurrentPushedObject->GetComponentsBoundingBox().GetCenter();
+			FVector ToBox = BoxCenter - CurrentLoc;
+			ToBox.Z = 0.0f;
+			float DistToCenter = ToBox.Size();
+
+			if (DistToCenter < PushInitialDistToBox && PushInitialDistToBox > 0.0f && !ToBox.IsNearlyZero())
+			{
+				FVector ClampedLoc = BoxCenter - (ToBox / DistToCenter) * PushInitialDistToBox;
+				ClampedLoc.Z = CurrentLoc.Z;
+				SetActorLocation(ClampedLoc, false);
+				CurrentLoc = ClampedLoc;
+			}
 		}
+
+		LastCharacterLocation = CurrentLoc;
 	}
 
-	// [2인 협동 운반] 서로를 바라보도록 캐릭터 회전 고정
+	// [넉다운/그로기/사망 시: FollowCamera가 head 소켓에 부착되어 있으므로
+	//  bUsePawnControlRotation만 토글하면 컨트롤러 회전 vs 본 회전이 자동 전환됨]
+	bool bIsDown = (bIsStunned || bIsGroggy || bIsDead || IsStunned());
+	if (!bIsDown && GetStatusComponent())
+	{
+		static const FGameplayTag StunTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
+		static const FGameplayTag PrimaryStunTag = FGameplayTag::RequestGameplayTag(FName("State.Primary.Stuned"), false);
+		bIsDown = (StunTag.IsValid() && GetStatusComponent()->HasStatusTag(StunTag)) ||
+			(PrimaryStunTag.IsValid() && GetStatusComponent()->HasStatusTag(PrimaryStunTag));
+	}
+
+	if (IsLocallyControlled() && GetFollowCamera())
+	{
+		GetFollowCamera()->bUsePawnControlRotation = !bIsDown;
+	}
+
+	// [2인 협동 운반 및 회전 제어]
 	if (CarryingComponent && CarryingComponent->IsCarrying())
 	{
 		if (APackageBase* HeavyPackage = Cast<APackageBase>(CarryingComponent->GetCarriedActor()))
 		{
 			if (HeavyPackage->PackageType == EPackageType::Heavy && HeavyPackage->CurrentCarriers.Num() >= 2)
 			{
-				if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+				AActor* OtherCarrier = (HeavyPackage->CurrentCarriers[0] == this) ? HeavyPackage->CurrentCarriers[1].Get() : HeavyPackage->CurrentCarriers[0].Get();
+				if (OtherCarrier)
 				{
-					MoveComp->bOrientRotationToMovement = false; // 강제 회전 방지
-				}
-				
-				// 택배(상대방)를 바라보도록 부드럽게 회전
-				FVector DirToPackage = HeavyPackage->GetActorLocation() - GetActorLocation();
-				DirToPackage.Z = 0.0f; // 상하 회전 방지
-				if (!DirToPackage.IsNearlyZero())
-				{
-					SetActorRotation(FMath::RInterpTo(GetActorRotation(), DirToPackage.Rotation(), DeltaTime, 10.0f));
-				}
-			}
-			else
-			{
-				// 혼자 들거나 다른 아이템을 들 때는 이동 방향 회전 원상복구
-				if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
-				{
-					MoveComp->bOrientRotationToMovement = true;
+					FVector DirToOther = OtherCarrier->GetActorLocation() - GetActorLocation();
+					DirToOther.Z = 0.0f;
+					if (!DirToOther.IsNearlyZero())
+					{
+						SetActorRotation(FMath::RInterpTo(GetActorRotation(), DirToOther.Rotation(), DeltaTime, 10.0f));
+					}
 				}
 			}
 		}
 	}
-	else if (!bIsPushingMode)
+
+	// [상태별 캐릭터 몸체 회전(bUseControllerRotationYaw) 및 시야각 데드존 제어]
+	bool bIsRotationLocked = (bIsPushingMode || bIsDown);
+
+	if (bIsRotationLocked)
 	{
-		// 물건을 안 들고 있고 밀기 모드도 아닐 때만 원래 이동 방향 회전 복구
-		if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+		bUseControllerRotationYaw = false;
+
+		// 밀기 모드 중 컨트롤러 회전이 에임오프셋 범위를 벗어나지 않도록 보장
+		if (bIsPushingMode && IsLocallyControlled() && GetController())
 		{
-			MoveComp->bOrientRotationToMovement = true;
+			FRotator ControlRot = GetController()->GetControlRotation();
+			float ForwardYaw = GetActorRotation().Yaw;
+			float DeltaYaw = FRotator::NormalizeAxis(ControlRot.Yaw - ForwardYaw);
+
+			if (DeltaYaw > PushCameraYawLimit)
+			{
+				ControlRot.Yaw = FRotator::NormalizeAxis(ForwardYaw + PushCameraYawLimit);
+				GetController()->SetControlRotation(ControlRot);
+			}
+			else if (DeltaYaw < -PushCameraYawLimit)
+			{
+				ControlRot.Yaw = FRotator::NormalizeAxis(ForwardYaw - PushCameraYawLimit);
+				GetController()->SetControlRotation(ControlRot);
+			}
 		}
 	}
+	else
+	{
+		float Speed = GetVelocity().Size2D();
+		bool bMoving = (Speed > 5.0f) || (GetCharacterMovement() && GetCharacterMovement()->GetCurrentAcceleration().SizeSquared() > 0.0f);
+
+		if (bMoving)
+		{
+			bUseControllerRotationYaw = true;
+		}
+		else
+		{
+			bUseControllerRotationYaw = false;
+
+			FRotator AimRot = GetBaseAimRotation();
+			FRotator ActorRot = GetActorRotation();
+			float DeltaYaw = FRotator::NormalizeAxis(AimRot.Yaw - ActorRot.Yaw);
+
+			if (FMath::Abs(DeltaYaw) > AimYawDeadzone)
+			{
+				float TargetYaw = (DeltaYaw > 0.0f) ? (AimRot.Yaw - AimYawDeadzone) : (AimRot.Yaw + AimYawDeadzone);
+				FRotator TargetRot = ActorRot;
+				TargetRot.Yaw = TargetYaw;
+				SetActorRotation(FMath::RInterpTo(ActorRot, TargetRot, DeltaTime, TurnInPlaceInterpSpeed));
+			}
+		}
+	}
+
+	// [AimYaw 복제: 로컬 플레이어가 계산한 AimYaw를 서버로 전송하여 다른 클라이언트에도 동기화]
+	if (IsLocallyControlled() && !HasAuthority())
+	{
+		FRotator AimRot = GetBaseAimRotation();
+		FRotator ActorRot = GetActorRotation();
+		float CurrentAimYaw = FMath::Clamp(FRotator::NormalizeAxis(AimRot.Yaw - ActorRot.Yaw), -70.0f, 70.0f);
+		ServerSetAimYaw(CurrentAimYaw);
+	}
+	else if (IsLocallyControlled() && HasAuthority())
+	{
+		FRotator AimRot = GetBaseAimRotation();
+		FRotator ActorRot = GetActorRotation();
+		ReplicatedAimYaw = FMath::Clamp(FRotator::NormalizeAxis(AimRot.Yaw - ActorRot.Yaw), -70.0f, 70.0f);
+	}
+}
+
+void AMainCharacter::ServerSetAimYaw_Implementation(float NewAimYaw)
+{
+	ReplicatedAimYaw = NewAimYaw;
 }
 
 void AMainCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -339,12 +498,17 @@ void AMainCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME(AMainCharacter, bIsPushingMode);
 	DOREPLIFETIME(AMainCharacter, CurrentPushedObject);
 	DOREPLIFETIME(AMainCharacter, CurrentPushInput);
+	DOREPLIFETIME(AMainCharacter, LockedPushDirection);
+	DOREPLIFETIME(AMainCharacter, PushLocalAnchor);
 	DOREPLIFETIME(AMainCharacter, DownCount);
+	DOREPLIFETIME(AMainCharacter, KnockdownCount);
 	DOREPLIFETIME(AMainCharacter, bIsGroggy);
 	DOREPLIFETIME(AMainCharacter, bIsDead);
 	DOREPLIFETIME(AMainCharacter, bIsReviving);
+	DOREPLIFETIME(AMainCharacter, bIsHoldingRevive);
 	DOREPLIFETIME(AMainCharacter, bIsFlashlightOn);
 	DOREPLIFETIME(AMainCharacter, FlashlightColorIndex);
+	DOREPLIFETIME(AMainCharacter, ReplicatedAimYaw);
 }
 
 void AMainCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -383,7 +547,7 @@ void AMainCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AMainCharacter::OnSprintStart);
 		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &AMainCharacter::OnSprintEnd);
 	}
-	
+
 	// 좌클릭: 아이템 사용
 	if (UseAction)
 	{
@@ -463,7 +627,7 @@ void AMainCharacter::DoMove(float Right, float Forward)
 		{
 			AddMovementInput(LockedPushDirection, Forward);
 		}
-		
+
 		// Super::DoMove()는 카메라 회전을 기준으로 방향을 잡으므로 생략
 		return;
 	}
@@ -480,27 +644,56 @@ void AMainCharacter::DoMove(float Right, float Forward)
 		StartSprinting();
 	}
 
-	// [이모트 취소 로직] 이동 키 입력이 들어왔고 현재 재생 중인 이모트가 있다면 즉시 취소
+	// [이모트 취소 로직] 이동 키 입력이 들어왔고 현재 재생 중인 이모트가 있다면 즉시 취소 (서버/모든 클라이언트 동기화)
 	if ((FMath::Abs(Right) > 0.1f || FMath::Abs(Forward) > 0.1f) && CurrentEmoteMontage != nullptr)
 	{
-		if (GetMesh() && GetMesh()->GetAnimInstance())
-		{
-			// 몽타주 정지 시 OnEmoteMontageEnded가 호출되어 표정도 자동으로 0으로 돌아감
-			GetMesh()->GetAnimInstance()->Montage_Stop(0.2f, CurrentEmoteMontage);
-		}
+		StopEmote();
 	}
 
 	Super::DoMove(Right, Forward);
 }
 
-void AMainCharacter::OnFocusedActorChanged(AActor* NewFocusedActor)
+void AMainCharacter::DoLook(float Yaw, float Pitch)
 {
-	// 이전 포커스 액터가 아이템이면 UI 숨김
-	if (AItemBase* PrevItem = Cast<AItemBase>(PreviousFocusedActor))
+	if (GetController() == nullptr)
 	{
-		PrevItem->HideItemInfo();
+		return;
 	}
 
+	// [밀기 모드 카메라 각도 제한]
+	// 몸체는 박스를 향해 고정되어 있으므로, 카메라는 에임오프셋 허용 범위(±PushCameraYawLimit, 기본 ±70도) 내에서만 회전
+	if (bIsPushingMode)
+	{
+		AddControllerPitchInput(Pitch);
+
+		if (FMath::Abs(Yaw) > 0.0f)
+		{
+			float ForwardYaw = GetActorRotation().Yaw;
+
+			AddControllerYawInput(Yaw);
+
+			FRotator NewControlRot = GetController()->GetControlRotation();
+			float DeltaYaw = FRotator::NormalizeAxis(NewControlRot.Yaw - ForwardYaw);
+
+			if (DeltaYaw > PushCameraYawLimit)
+			{
+				NewControlRot.Yaw = FRotator::NormalizeAxis(ForwardYaw + PushCameraYawLimit);
+				GetController()->SetControlRotation(NewControlRot);
+			}
+			else if (DeltaYaw < -PushCameraYawLimit)
+			{
+				NewControlRot.Yaw = FRotator::NormalizeAxis(ForwardYaw - PushCameraYawLimit);
+				GetController()->SetControlRotation(NewControlRot);
+			}
+		}
+		return;
+	}
+
+	Super::DoLook(Yaw, Pitch);
+}
+
+void AMainCharacter::OnFocusedActorChanged(AActor* NewFocusedActor)
+{
 	// [요구사항] 물건을 잡고 있을 때는 UI 표시 안 함
 	if (CarryingComponent && CarryingComponent->IsCarrying())
 	{
@@ -511,13 +704,37 @@ void AMainCharacter::OnFocusedActorChanged(AActor* NewFocusedActor)
 			FocusedGroggyTarget = nullptr;
 			OnReviveTargetAimChanged(false, nullptr);
 		}
+		if (bIsAimingAtItem)
+		{
+			bIsAimingAtItem = false;
+			FocusedItem = nullptr;
+			OnItemAimChanged(false, nullptr);
+		}
 		return;
 	}
 
-	// 새 포커스 액터가 아이템이면 UI 표시
+	// 새 포커스 액터가 아이템인지 확인 (이벤트 오브젝트 제외하고 순수 아이템/택배만 UI 표시)
 	if (AItemBase* NewItem = Cast<AItemBase>(NewFocusedActor))
 	{
-		NewItem->ShowItemInfo();
+		// [요구사항] 이벤트 오브젝트(AEventObjectBase)는 아이템 정보 UI 표시 대상에서 완전 제외
+		if (!NewItem->IsA<AEventObjectBase>())
+		{
+			bIsAimingAtItem = true;
+			FocusedItem = NewItem;
+			OnItemAimChanged(true, NewItem);
+		}
+		else if (bIsAimingAtItem)
+		{
+			bIsAimingAtItem = false;
+			FocusedItem = nullptr;
+			OnItemAimChanged(false, nullptr);
+		}
+	}
+	else if (bIsAimingAtItem)
+	{
+		bIsAimingAtItem = false;
+		FocusedItem = nullptr;
+		OnItemAimChanged(false, nullptr);
 	}
 
 	// 새 포커스 액터가 그로기 상태의 팀원인지 확인
@@ -559,13 +776,23 @@ void AMainCharacter::DoJumpStart()
 		return;
 	}
 
+	if (CurrentEmoteMontage != nullptr)
+	{
+		StopEmote();
+	}
+
 	Super::DoJumpStart();
 }
 
 void AMainCharacter::OnInteract()
 {
-	// 상호작용 실행 시 달리기 즉시 해제
+	// 상호작용 실행 시 달리기 즉시 해제 및 이모트 취소
 	StopSprinting();
+
+	if (CurrentEmoteMontage != nullptr)
+	{
+		StopEmote();
+	}
 
 	// 밀기 모드 중이라면 토글(해제) 처리
 	if (bIsPushingMode)
@@ -618,6 +845,11 @@ void AMainCharacter::OnGrabOrDrop()
 		return;
 	}
 
+	if (CurrentEmoteMontage != nullptr)
+	{
+		StopEmote();
+	}
+
 	// 줍기/내려놓기 시 달리기 즉시 해제
 	StopSprinting();
 
@@ -625,7 +857,7 @@ void AMainCharacter::OnGrabOrDrop()
 	{
 		bool bWasCarrying = CarryingComponent->IsCarrying();
 		CarryingComponent->GrabOrDrop();
-		
+
 		// 들고 있던 물건을 방금 내려놓았다면, 현재 바라보고 있는 대상의 UI를 다시 갱신(표시)
 		if (bWasCarrying && !CarryingComponent->IsCarrying() && InteractionComponent)
 		{
@@ -639,6 +871,11 @@ void AMainCharacter::OnThrow()
 	if (!CanAct() || bIsPushingMode)
 	{
 		return;
+	}
+
+	if (CurrentEmoteMontage != nullptr)
+	{
+		StopEmote();
 	}
 
 	if (AbilitySystemComponent)
@@ -921,8 +1158,21 @@ void AMainCharacter::OnJumpStartInput()
 		static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Dead"), false);
 		static const FGameplayTag StunnedTag = FGameplayTag::RequestGameplayTag(FName("State.Stunned"), false);
 
+		// [2인 협동 운반 여부 확인]
+		bool bIs2PersonCarrying = false;
+		if (CarryingComponent && CarryingComponent->IsCarrying())
+		{
+			if (APackageBase* HeavyPackage = Cast<APackageBase>(CarryingComponent->GetCarriedActor()))
+			{
+				bIs2PersonCarrying = (HeavyPackage->PackageType == EPackageType::Heavy && HeavyPackage->CurrentCarriers.Num() >= 2);
+			}
+		}
+
+		// 무거운 택배를 1명이서 들고 있을 때만 점프 차단 (2명이서 같이 들고 있을 때는 점프 허용)
+		const bool bBlockHeavyCarryJump = HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag) && !bIs2PersonCarrying;
+
 		if ((BlockJumpTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(BlockJumpTag)) ||
-			(HeavyCarryTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(HeavyCarryTag)) ||
+			bBlockHeavyCarryJump ||
 			(ImmobileTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(ImmobileTag)) ||
 			(PushingTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(PushingTag)) ||
 			(GroggyTag.IsValid() && AbilitySystemComponent->HasMatchingGameplayTag(GroggyTag)) ||
@@ -978,9 +1228,22 @@ void AMainCharacter::OnUse()
 	}
 }
 
+// 손에 든 무기가 지금 "사용 중"이면 true (사용 중엔 슬롯 변경 차단). [WEAPON-016]
+bool AMainCharacter::IsHandWeaponInUse() const
+{
+	if (CarryingComponent && CarryingComponent->IsCarrying())
+	{
+		if (const AWeaponItemBase* HandWeapon = Cast<AWeaponItemBase>(CarryingComponent->GetCarriedActor()))
+		{
+			return HandWeapon->IsInUse();
+		}
+	}
+	return false;
+}
+
 void AMainCharacter::OnSlot1()
 {
-	if (!CanAct() || bIsPushingMode) return;
+	if (!CanAct() || bIsPushingMode || IsHandWeaponInUse()) return;
 
 	if (AbilitySystemComponent)
 	{
@@ -999,7 +1262,7 @@ void AMainCharacter::OnSlot1()
 
 void AMainCharacter::OnSlot2()
 {
-	if (!CanAct() || bIsPushingMode) return;
+	if (!CanAct() || bIsPushingMode || IsHandWeaponInUse()) return;
 
 	if (AbilitySystemComponent)
 	{
@@ -1018,7 +1281,7 @@ void AMainCharacter::OnSlot2()
 
 void AMainCharacter::OnSlot3()
 {
-	if (!CanAct() || bIsPushingMode) return;
+	if (!CanAct() || bIsPushingMode || IsHandWeaponInUse()) return;
 
 	if (AbilitySystemComponent)
 	{
@@ -1159,13 +1422,28 @@ void AMainCharacter::OnEmoteToggle()
 
 void AMainCharacter::SetEmotion(int32 EmotionIndex, FLinearColor EmoteColor)
 {
-	for (UMaterialInstanceDynamic* DMI : FaceMaterialInstances)
+	if (VisualComponent)
 	{
-		if (DMI)
+		if (EmotionIndex == 0)
 		{
-			DMI->SetScalarParameterValue(EmotionParameterName, static_cast<float>(EmotionIndex));
-			DMI->SetVectorParameterValue(EmotionColorParameterName, EmoteColor);
-		} 
+			VisualComponent->ClearTemporaryOverride();
+			VisualComponent->RefreshVisualState();
+		}
+		else
+		{
+			VisualComponent->ApplyCustomEmotion(EmotionIndex, EmoteColor);
+		}
+	}
+	else
+	{
+		for (UMaterialInstanceDynamic* DMI : FaceMaterialInstances)
+		{
+			if (DMI)
+			{
+				DMI->SetScalarParameterValue(EmotionParameterName, static_cast<float>(EmotionIndex));
+				DMI->SetVectorParameterValue(EmotionColorParameterName, EmoteColor);
+			}
+		}
 	}
 }
 
@@ -1253,8 +1531,16 @@ void AMainCharacter::MulticastPlayEmote_Implementation(UAnimMontage* EmoteMontag
 		return;
 	}
 
-	// 1. 선택한 감정 표정과 색상으로 얼굴 머티리얼 변경
-	SetEmotion(EmotionIndex, EmoteColor);
+	// 1. 선택한 감정 표정과 색상으로 얼굴 머티리얼 임시 오버라이드 적용 (우선순위 70)
+	if (VisualComponent)
+	{
+		FCharacterVisualPreset EmotePreset(static_cast<float>(EmotionIndex), EmoteColor, 1.5f, 70);
+		VisualComponent->SetTemporaryOverride(EmotePreset);
+	}
+	else
+	{
+		SetEmotion(EmotionIndex, EmoteColor);
+	}
 
 	// 2. 이모트 몽타주 재생
 	UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
@@ -1265,6 +1551,42 @@ void AMainCharacter::MulticastPlayEmote_Implementation(UAnimMontage* EmoteMontag
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AMainCharacter::OnEmoteMontageEnded);
 	AnimInstance->Montage_SetEndDelegate(EndDelegate, EmoteMontage);
+}
+
+void AMainCharacter::StopEmote()
+{
+	if (CurrentEmoteMontage == nullptr)
+	{
+		return;
+	}
+
+	if (!HasAuthority())
+	{
+		ServerStopEmote();
+	}
+	else
+	{
+		MulticastStopEmote();
+	}
+}
+
+void AMainCharacter::ServerStopEmote_Implementation()
+{
+	MulticastStopEmote();
+}
+
+void AMainCharacter::MulticastStopEmote_Implementation()
+{
+	if (CurrentEmoteMontage && GetMesh() && GetMesh()->GetAnimInstance())
+	{
+		GetMesh()->GetAnimInstance()->Montage_Stop(0.2f, CurrentEmoteMontage);
+	}
+
+	if (VisualComponent)
+	{
+		VisualComponent->ClearTemporaryOverride();
+	}
+	CurrentEmoteMontage = nullptr;
 }
 
 void AMainCharacter::ChangeEmotion(int32 EmotionIndex, FLinearColor EmoteColor)
@@ -1294,8 +1616,15 @@ void AMainCharacter::OnEmoteMontageEnded(UAnimMontage* Montage, bool bInterrupte
 	// 방금 끝난 몽타주가 이모트 몽타주인지 확인
 	if (Montage == CurrentEmoteMontage)
 	{
-		// 이모트가 끝났거나 중단(이동으로 인한 취소)되었으므로 기본 표정(0)과 기본 색상으로 복귀
-		SetEmotion(0, FLinearColor(0.0f, 0.623294f, 1.0f, 1.0f));
+		// 이모트가 끝났거나 중단(이동으로 인한 취소)되었으므로 원래 우선순위 상태로 복원
+		if (VisualComponent)
+		{
+			VisualComponent->ClearTemporaryOverride();
+		}
+		else
+		{
+			SetEmotion(0, FLinearColor(0.0f, 0.623294f, 1.0f, 1.0f));
+		}
 		CurrentEmoteMontage = nullptr;
 	}
 }
@@ -1320,74 +1649,51 @@ bool AMainCharacter::CanMove() const
 
 void AMainCharacter::Knockdown()
 {
-	if (!HasAuthority())
-	{
-		return;
-	}
-
-	// 이미 기절 상태면 무시
 	if (bIsStunned)
 	{
 		return;
 	}
 
-	bIsStunned = true;
-
-	// 부활 차징 중이었다면 취소
-	if (bIsHoldingRevive)
+	if (!HasAuthority())
 	{
-		CancelReviveHold();
+		ServerKnockdown();
+		return;
 	}
 
-	// 물건을 들고 있었다면 떨어뜨림 (GrabOrDrop은 서버에서만 호출해야 함)
-	if (CarryingComponent && CarryingComponent->IsCarrying())
+	// GAS GA_Knockdown 어빌리티 실행
+	if (AbilitySystemComponent && KnockdownAbilitySpecHandle.IsValid())
 	{
-		CarryingComponent->GrabOrDrop();
+		AbilitySystemComponent->TryActivateAbility(KnockdownAbilitySpecHandle);
 	}
-
-	// 달리기 취소
-	if (bIsSprinting)
-	{
-		ServerSetSprinting_Implementation(false);
-	}
-
-	// 애니메이션 재생 멀티캐스트 호출
-	MulticastKnockdown();
 }
 
-void AMainCharacter::MulticastKnockdown_Implementation()
+void AMainCharacter::ServerKnockdown_Implementation()
 {
-	if (KnockdownMontage && GetMesh() && GetMesh()->GetAnimInstance())
-	{
-		float AnimDuration = GetMesh()->GetAnimInstance()->Montage_Play(KnockdownMontage);
-		
-		// 몽타주가 재생되지 않았을 경우(0.0) 대비 안전장치
-		if (AnimDuration <= 0.0f)
-		{
-			AnimDuration = 2.0f;
-		}
-
-		// 서버에서 타이머를 설정하여 기절 상태 복구
-		if (HasAuthority())
-		{
-			GetWorldTimerManager().SetTimer(KnockdownTimerHandle, this, &AMainCharacter::OnKnockdownEnd, AnimDuration, false);
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("KnockdownMontage가 할당되지 않았거나 재생할 수 없습니다. 즉시 회복됩니다."));
-		if (HasAuthority())
-		{
-			OnKnockdownEnd();
-		}
-	}
+	Knockdown();
 }
 
-void AMainCharacter::OnKnockdownEnd()
+void AMainCharacter::PlayHitReaction(float Duration)
 {
 	if (HasAuthority())
 	{
-		bIsStunned = false;
+		MulticastPlayHitReaction(Duration);
+	}
+	else
+	{
+		if (VisualComponent)
+		{
+			static const FGameplayTag HitTag = FGameplayTag::RequestGameplayTag(FName("State.Player.HitReaction"), false);
+			VisualComponent->SetTagTemporaryOverride(HitTag, Duration);
+		}
+	}
+}
+
+void AMainCharacter::MulticastPlayHitReaction_Implementation(float Duration)
+{
+	if (VisualComponent)
+	{
+		static const FGameplayTag HitTag = FGameplayTag::RequestGameplayTag(FName("State.Player.HitReaction"), false);
+		VisualComponent->SetTagTemporaryOverride(HitTag, Duration);
 	}
 }
 
@@ -1424,7 +1730,7 @@ void AMainCharacter::HandleHealthZero()
 			{
 				CarryingComponent->GrabOrDrop();
 			}
-			
+
 			OnSprintEnd();
 			MulticastOnEnterGroggy();
 		}
@@ -1449,8 +1755,8 @@ void AMainCharacter::HandleHealthZero()
 					{
 						Item->MulticastOnEquipped(nullptr);
 						FVector ScatterImpulse = FVector(
-							FMath::RandRange(-400.f, 400.f), 
-							FMath::RandRange(-400.f, 400.f), 
+							FMath::RandRange(-400.f, 400.f),
+							FMath::RandRange(-400.f, 400.f),
 							FMath::RandRange(400.f, 700.f)
 						);
 						Item->Throw(ScatterImpulse, this);
@@ -1507,16 +1813,29 @@ void AMainCharacter::FinishRevive_Implementation()
 // Multicast RPC 구현
 void AMainCharacter::MulticastOnEnterGroggy_Implementation()
 {
+	if (VisualComponent)
+	{
+		VisualComponent->RefreshVisualState();
+	}
 	OnEnterGroggy();
 }
 
 void AMainCharacter::MulticastOnRevived_Implementation()
 {
+	if (VisualComponent)
+	{
+		VisualComponent->ClearTemporaryOverride();
+		VisualComponent->RefreshVisualState();
+	}
 	OnRevived();
 }
 
 void AMainCharacter::MulticastOnDeath_Implementation()
 {
+	if (VisualComponent)
+	{
+		VisualComponent->RefreshVisualState();
+	}
 	OnDeath();
 }
 
@@ -1560,16 +1879,16 @@ void AMainCharacter::Interact_Implementation(AActor* Interactor)
 		{
 			// 살려주는 사람의 현재 체력 가져오기
 			float ReviverCurrentHealth = Reviver->BaseAttribute->GetHealth();
-			
+
 			// 자신의 체력을 절반 깎고, 그 양을 쓰러진 사람에게 부여
 			float HealthToGive = ReviverCurrentHealth / 2.0f;
-			
+
 			// 최소 체력 1은 남겨두기 위한 안전장치 (원한다면 제거 가능)
 			if (HealthToGive < 1.0f) HealthToGive = 1.0f;
 			float NewReviverHealth = FMath::Max(1.0f, ReviverCurrentHealth - HealthToGive);
 
 			Reviver->BaseAttribute->SetHealth(NewReviverHealth);
-			
+
 			// 쓰러진 캐릭터 부활 처리
 			ReviveCharacter(HealthToGive);
 		}
@@ -1597,7 +1916,10 @@ void AMainCharacter::StartPushMode(AActor* TargetObject)
 	// 표정 변경 (서버에서 실행되면 내부적으로 Multicast를 통해 동기화됨)
 	if (HasAuthority())
 	{
-		ChangeEmotion(EmotionIndex_Pushing);
+		if (VisualComponent)
+		{
+			VisualComponent->RefreshVisualState();
+		}
 	}
 
 	// 무기/아이템 들고 있으면 해제
@@ -1614,6 +1936,12 @@ void AMainCharacter::StartPushMode(AActor* TargetObject)
 
 	if (AbilitySystemComponent)
 	{
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+		if (PushingTag.IsValid())
+		{
+			AbilitySystemComponent->AddLooseGameplayTag(PushingTag);
+		}
+
 		if (PushAbilitySpecHandle.IsValid())
 		{
 			AbilitySystemComponent->TryActivateAbility(PushAbilitySpecHandle);
@@ -1623,6 +1951,14 @@ void AMainCharacter::StartPushMode(AActor* TargetObject)
 			static const FGameplayTagContainer PushTagContainer(FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing")));
 			AbilitySystemComponent->TryActivateAbilitiesByTag(PushTagContainer);
 		}
+	}
+
+	if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(TargetObject->GetRootComponent()))
+	{
+		PrimComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		PrimComp->IgnoreActorWhenMoving(this, true);
+		GetCapsuleComponent()->IgnoreActorWhenMoving(TargetObject, true);
+		GetMesh()->IgnoreActorWhenMoving(TargetObject, true);
 	}
 
 	if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
@@ -1638,27 +1974,46 @@ void AMainCharacter::StartPushMode(AActor* TargetObject)
 	SetActorRotation(Dir.Rotation());
 	LockedPushDirection = Dir;
 
+	// 상자 중심점과의 초기 수평 거리 기록 (메쉬 관통 방지용)
+	PushInitialDistToBox = FVector::Dist2D(GetActorLocation(), BoxCenter);
+
+	// 상자 로컬 공간 기준 손 접촉 앵커 위치 기록 (거리 이탈 감지용)
+	if (TargetObject)
+	{
+		PushLocalAnchor = TargetObject->GetActorTransform().InverseTransformPosition(GetActorLocation());
+	}
+
+	// 밀기 시작 시 로컬 카메라 방향도 밀기 방향 기준 에임오프셋 범위 내로 즉시 보정
+	if (IsLocallyControlled() && GetController())
+	{
+		FRotator ControlRot = GetController()->GetControlRotation();
+		float ForwardYaw = Dir.Rotation().Yaw;
+		float DeltaYaw = FRotator::NormalizeAxis(ControlRot.Yaw - ForwardYaw);
+		if (FMath::Abs(DeltaYaw) > PushCameraYawLimit)
+		{
+			ControlRot.Yaw = FRotator::NormalizeAxis(ForwardYaw + FMath::Clamp(DeltaYaw, -PushCameraYawLimit, PushCameraYawLimit));
+			GetController()->SetControlRotation(ControlRot);
+		}
+	}
+
+	// 밀기 중에는 마우스 회전 간섭 차단
+	bUseControllerRotationYaw = false;
+
 	if (GetCharacterMovement())
 	{
-		bOriginalOrientRotation = GetCharacterMovement()->bOrientRotationToMovement;
 		GetCharacterMovement()->bOrientRotationToMovement = false;
 	}
 
 	LastCharacterLocation = GetActorLocation();
-
-	if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(TargetObject->GetRootComponent()))
-	{
-		PrimComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-		PrimComp->IgnoreActorWhenMoving(this, true);
-		GetCapsuleComponent()->IgnoreActorWhenMoving(TargetObject, true);
-		GetMesh()->IgnoreActorWhenMoving(TargetObject, true);
-	}
 
 	if (StatusComponent)
 	{
 		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
 		StatusComponent->AddStatusTag(PushingTag);
 	}
+
+
+	UpdateCharacterSpeed();
 }
 
 void AMainCharacter::ServerStartPushMode_Implementation(AActor* TargetObject)
@@ -1675,13 +2030,27 @@ void AMainCharacter::StopPushMode()
 
 	if (HasAuthority())
 	{
-		ChangeEmotion(EmotionIndex_Normal);
+		if (VisualComponent)
+		{
+			VisualComponent->ClearTemporaryOverride();
+			VisualComponent->RefreshVisualState();
+		}
+		else
+		{
+			ChangeEmotion(0);
+		}
 	}
 
 	bIsPushingMode = false;
 
 	if (AbilitySystemComponent)
 	{
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+		if (PushingTag.IsValid())
+		{
+			AbilitySystemComponent->RemoveLooseGameplayTag(PushingTag);
+		}
+
 		if (PushAbilitySpecHandle.IsValid())
 		{
 			AbilitySystemComponent->CancelAbilityHandle(PushAbilitySpecHandle);
@@ -1692,7 +2061,7 @@ void AMainCharacter::StopPushMode()
 			AbilitySystemComponent->CancelAbilities(&PushTagContainer);
 		}
 	}
-	
+
 	if (CurrentPushedObject)
 	{
 		if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(CurrentPushedObject))
@@ -1716,6 +2085,8 @@ void AMainCharacter::StopPushMode()
 	}
 
 	CurrentPushedObject = nullptr;
+	PushInitialDistToBox = 0.0f;
+	PushLocalAnchor = FVector::ZeroVector;
 
 	if (StatusComponent)
 	{
@@ -1725,8 +2096,26 @@ void AMainCharacter::StopPushMode()
 
 	if (GetCharacterMovement())
 	{
-		GetCharacterMovement()->bOrientRotationToMovement = bOriginalOrientRotation;
+		GetCharacterMovement()->bOrientRotationToMovement = false;
 	}
+
+	// 2인 운반 중이 아니라면 1인칭 조작계(bUseControllerRotationYaw) 복구
+	bool bIs2PersonCarrying = false;
+	if (CarryingComponent && CarryingComponent->IsCarrying())
+	{
+		if (APackageBase* HeavyPackage = Cast<APackageBase>(CarryingComponent->GetCarriedActor()))
+		{
+			bIs2PersonCarrying = (HeavyPackage->PackageType == EPackageType::Heavy && HeavyPackage->CurrentCarriers.Num() >= 2);
+		}
+	}
+
+	if (!bIs2PersonCarrying)
+	{
+		bUseControllerRotationYaw = true;
+	}
+
+	// 밀기 모드 해제 후 현재 과적 및 기본 상태에 맞춰 이동속도 즉시 재계산 및 복구
+	UpdateCharacterSpeed();
 }
 
 void AMainCharacter::ServerStopPushMode_Implementation()
@@ -1741,8 +2130,60 @@ void AMainCharacter::ServerSetPushInput_Implementation(float NewInput)
 
 void AMainCharacter::OnRep_IsPushingMode()
 {
-	// 리플리케이션(복제)에 따른 UI나 기타 상태 업데이트가 필요하면 이곳에 작성합니다.
-	// bIsPushingMode 값 자체는 이미 서버와 동기화되었으므로 애니메이션은 정상 작동합니다.
+	// 리플리케이션(복제)에 따른 태그 및 상태 업데이트
+	if (AbilitySystemComponent)
+	{
+		static const FGameplayTag PushingTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Pushing"), false);
+		if (PushingTag.IsValid())
+		{
+			if (bIsPushingMode)
+			{
+				AbilitySystemComponent->AddLooseGameplayTag(PushingTag);
+			}
+			else
+			{
+				AbilitySystemComponent->RemoveLooseGameplayTag(PushingTag);
+			}
+		}
+	}
+
+	if (bIsPushingMode)
+	{
+		bUseControllerRotationYaw = false;
+		if (GetCharacterMovement())
+		{
+			GetCharacterMovement()->bOrientRotationToMovement = false;
+		}
+
+		if (CurrentPushedObject)
+		{
+			if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(CurrentPushedObject->GetRootComponent()))
+			{
+				PrimComp->IgnoreActorWhenMoving(this, true);
+			}
+			GetCapsuleComponent()->IgnoreActorWhenMoving(CurrentPushedObject, true);
+			GetMesh()->IgnoreActorWhenMoving(CurrentPushedObject, true);
+		}
+	}
+	else
+	{
+		if (CurrentPushedObject)
+		{
+			if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(CurrentPushedObject->GetRootComponent()))
+			{
+				PrimComp->IgnoreActorWhenMoving(this, false);
+			}
+			GetCapsuleComponent()->IgnoreActorWhenMoving(CurrentPushedObject, false);
+			GetMesh()->IgnoreActorWhenMoving(CurrentPushedObject, false);
+		}
+
+		if (GetCharacterMovement())
+		{
+			GetCharacterMovement()->bOrientRotationToMovement = false;
+		}
+	}
+
+	UpdateCharacterSpeed();
 }
 
 float AMainCharacter::GetRequiredReviveTime() const
@@ -1767,11 +2208,37 @@ float AMainCharacter::GetReviveProgress() const
 	return FMath::Clamp(CurrentReviveHoldTime / Duration, 0.0f, 1.0f);
 }
 
+void AMainCharacter::OnRep_IsHoldingRevive()
+{
+	static const FGameplayTag ReviveTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Reviving"), false);
+	if (StatusComponent)
+	{
+		if (bIsHoldingRevive)
+		{
+			StatusComponent->AddStatusTag(ReviveTag);
+		}
+		else
+		{
+			StatusComponent->RemoveStatusTag(ReviveTag);
+		}
+	}
+
+	if (VisualComponent)
+	{
+		VisualComponent->RefreshVisualState();
+	}
+}
+
 void AMainCharacter::StartReviveHold(AMainCharacter* Target)
 {
 	if (!Target || !Target->bIsGroggy || Target->bIsDead || Target == this)
 	{
 		return;
+	}
+
+	if (!HasAuthority())
+	{
+		ServerStartReviveHold(Target);
 	}
 
 	bIsHoldingRevive = true;
@@ -1784,14 +2251,31 @@ void AMainCharacter::StartReviveHold(AMainCharacter* Target)
 		GetCharacterMovement()->StopMovementImmediately();
 	}
 
+	// 부활 태그 추가 및 비주얼 갱신
+	static const FGameplayTag ReviveTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Reviving"), false);
+	if (StatusComponent)
+	{
+		StatusComponent->AddStatusTag(ReviveTag);
+	}
+
 	// GAS 어빌리티 활성화
 	if (AbilitySystemComponent && ReviveAbilitySpecHandle.IsValid())
 	{
 		AbilitySystemComponent->TryActivateAbility(ReviveAbilitySpecHandle);
 	}
 
+	if (VisualComponent)
+	{
+		VisualComponent->RefreshVisualState();
+	}
+
 	OnReviveHoldStarted(Target);
 	Target->SetReviveProgress(0.0f);
+}
+
+void AMainCharacter::ServerStartReviveHold_Implementation(AMainCharacter* Target)
+{
+	StartReviveHold(Target);
 }
 
 void AMainCharacter::CancelReviveHold()
@@ -1801,12 +2285,29 @@ void AMainCharacter::CancelReviveHold()
 		return;
 	}
 
+	if (!HasAuthority())
+	{
+		ServerCancelReviveHold();
+	}
+
 	bIsHoldingRevive = false;
 	CurrentReviveHoldTime = 0.0f;
+
+	// 부활 태그 제거 및 비주얼 갱신
+	static const FGameplayTag ReviveTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Reviving"), false);
+	if (StatusComponent)
+	{
+		StatusComponent->RemoveStatusTag(ReviveTag);
+	}
 
 	if (AbilitySystemComponent && ReviveAbilitySpecHandle.IsValid())
 	{
 		AbilitySystemComponent->CancelAbilityHandle(ReviveAbilitySpecHandle);
+	}
+
+	if (VisualComponent)
+	{
+		VisualComponent->RefreshVisualState();
 	}
 
 	if (CurrentReviveTarget.IsValid())
@@ -1816,6 +2317,11 @@ void AMainCharacter::CancelReviveHold()
 	CurrentReviveTarget = nullptr;
 
 	OnReviveHoldEnded(false);
+}
+
+void AMainCharacter::ServerCancelReviveHold_Implementation()
+{
+	CancelReviveHold();
 }
 
 void AMainCharacter::CompleteReviveHold()
@@ -1831,9 +2337,21 @@ void AMainCharacter::CompleteReviveHold()
 	CurrentReviveHoldTime = 0.0f;
 	CurrentReviveTarget = nullptr;
 
+	// 부활 태그 제거 및 비주얼 갱신
+	static const FGameplayTag ReviveTag = FGameplayTag::RequestGameplayTag(FName("State.Player.Reviving"), false);
+	if (StatusComponent)
+	{
+		StatusComponent->RemoveStatusTag(ReviveTag);
+	}
+
 	if (AbilitySystemComponent && ReviveAbilitySpecHandle.IsValid())
 	{
 		AbilitySystemComponent->CancelAbilityHandle(ReviveAbilitySpecHandle);
+	}
+
+	if (VisualComponent)
+	{
+		VisualComponent->RefreshVisualState();
 	}
 
 	OnReviveHoldEnded(true);
@@ -1854,19 +2372,35 @@ void AMainCharacter::HandleHealthChanged(const FOnAttributeChangeData& Data)
 {
 	Super::HandleHealthChanged(Data);
 
-	// 체력 감소(피격 시) 부활 차징 취소
-	if (Data.NewValue < Data.OldValue && bIsHoldingRevive)
+	// 체력 감소(대미지 피격 시)
+	if (Data.NewValue < Data.OldValue)
 	{
-		CancelReviveHold();
+		if (bIsHoldingRevive)
+		{
+			CancelReviveHold();
+		}
+
+		if (!bIsDead && !bIsGroggy && Data.NewValue > 0.0f)
+		{
+			PlayHitReaction(0.4f);
+		}
 	}
 }
 
 float AMainCharacter::TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, class AController* EventInstigator, AActor* DamageCauser)
 {
 	float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
-	if (ActualDamage > 0.0f && bIsHoldingRevive)
+	if (ActualDamage > 0.0f)
 	{
-		CancelReviveHold();
+		if (bIsHoldingRevive)
+		{
+			CancelReviveHold();
+		}
+
+		if (!bIsDead && !bIsGroggy)
+		{
+			PlayHitReaction(0.4f);
+		}
 	}
 	return ActualDamage;
 }

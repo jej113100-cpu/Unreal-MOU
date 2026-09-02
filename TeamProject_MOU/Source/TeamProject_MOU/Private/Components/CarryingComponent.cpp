@@ -128,9 +128,13 @@ void UCarryingComponent::GrabOrDrop()
 		}
 		
 		// 내려놓을 때 표정 복구
-		if (AMainCharacter* MainChar = Cast<AMainCharacter>(GetOwner()))
+		if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
 		{
-			MainChar->ChangeEmotion(MainChar->EmotionIndex_Normal);
+			if (Char->GetVisualComponent())
+			{
+				Char->GetVisualComponent()->ClearTemporaryOverride();
+				Char->GetVisualComponent()->RefreshVisualState();
+			}
 		}
 
 		if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
@@ -174,6 +178,21 @@ void UCarryingComponent::GrabOrDrop()
 		{
 			if (AItemBase* Item = Cast<AItemBase>(Actor))
 			{
+				// 다른 사람이 이미 들고 있어 집을 수 없는 아이템은 대상에서 제외 (가로채기 방지 및 헛손질 방지)
+				if (!Item->CanBePickedUpBy(GetOwner()))
+				{
+					continue;
+				}
+
+				// 밀기 전용 오브젝트 제외
+				if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(Item))
+				{
+					if (EventObj->bIsPushable)
+					{
+						continue;
+					}
+				}
+
 				float DistSq = FVector::DistSquared(OwnerLocation, Actor->GetActorLocation());
 				if (DistSq < MinDistanceSq)
 				{
@@ -202,6 +221,11 @@ void UCarryingComponent::GrabOrDrop()
 
 			if (HitItem)
 			{
+				if (!HitItem->CanBePickedUpBy(GetOwner()))
+				{
+					return;
+				}
+
 				// [요구사항] 밀기 전용 이벤트 오브젝트는 잡거나 던질 수 없음
 				if (AEventObjectBase* EventObj = Cast<AEventObjectBase>(HitItem))
 				{
@@ -216,18 +240,7 @@ void UCarryingComponent::GrabOrDrop()
 
 				if (APackageBase* Package = Cast<APackageBase>(HitItem))
 				{
-					// 무거운 택배는 이미 2명이 들고 있으면 들 수 없음
-					if (Package->PackageType == EPackageType::Heavy && Package->CurrentCarriers.Num() >= 2)
-					{
-						UE_LOG(LogTemp, Warning, TEXT("무거운 택배는 이미 2명이 들고 있어 들 수 없습니다."));
-						return;
-					}
-
 					if (Package->PackageType == EPackageType::Heavy)
-					{
-						bShouldAttach = false;
-					}
-					else if (Package->CurrentCarriers.Num() > 0)
 					{
 						bShouldAttach = false;
 					}
@@ -246,6 +259,11 @@ void UCarryingComponent::GrabOrDrop()
 					if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
 					{
 						HitItem->AttachToComponent(Character->GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, CarrySocketName);
+
+						if (APackageBase* Package = Cast<APackageBase>(HitItem))
+						{
+							HitItem->SetActorRelativeRotation(Package->SingleCarryRotationOffset);
+						}
 
 						FVector BoxCenter = HitItem->GetComponentsBoundingBox().GetCenter();
 						FVector Origin = HitItem->GetActorLocation();
@@ -298,18 +316,11 @@ void UCarryingComponent::GrabOrDrop()
 			UpdateCharacterTotalWeight();
 
 			// 표정 변화 적용
-			if (AMainCharacter* MainChar = Cast<AMainCharacter>(GetOwner()))
+			if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
 			{
-				if (HitCharacter)
+				if (Char->GetVisualComponent())
 				{
-					MainChar->ChangeEmotion(MainChar->EmotionIndex_CarryCharacter);
-				}
-				else if (APackageBase* Package = Cast<APackageBase>(HitItem))
-				{
-					if (Package->PackageType == EPackageType::Heavy)
-					{
-						MainChar->ChangeEmotion(MainChar->EmotionIndex_HeavyPackage);
-					}
+					Char->GetVisualComponent()->RefreshVisualState();
 				}
 			}
 
@@ -403,9 +414,13 @@ void UCarryingComponent::Throw()
 		}
 
 		// 던질 때 표정 복구
-		if (AMainCharacter* MainChar = Cast<AMainCharacter>(GetOwner()))
+		if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))
 		{
-			MainChar->ChangeEmotion(MainChar->EmotionIndex_Normal);
+			if (Char->GetVisualComponent())
+			{
+				Char->GetVisualComponent()->ClearTemporaryOverride();
+				Char->GetVisualComponent()->RefreshVisualState();
+			}
 		}
 
 		if (ACharacterBase* Char = Cast<ACharacterBase>(GetOwner()))

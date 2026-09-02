@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameStateBase.h"
+#include "Economy/EconomyTypes.h"
 #include "ProjectGameStateBase.generated.h"
 
 /**
@@ -21,24 +22,24 @@ public:
 	// Gold
 	// ==============================================
 
-	// ÇöÀç ÆÀÀÌ º¸À¯ÇÑ °ñµå
+	// í˜„ì¬ ë³´ìœ  ì¤‘ì¸ ê³¨ë“œ
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Gold, Category = "Economy")
 	int32 Gold;
 
-	// °ñµå Ãß°¡
+	// ê³¨ë“œ ì¶”ê°€
 	UFUNCTION(BlueprintCallable, Category = "Economy")
 	void AddGold(int32 Amount);
 
-	// °ñµå »ç¿ë
-	// °ñµå°¡ ºÎÁ·ÇÏ¸é false ¹İÈ¯
+	// ê³¨ë“œ ì‚¬ìš©
+	// ê³¨ë“œê°€ ë¶€ì¡±í•˜ë©´ false ë°˜í™˜
 	UFUNCTION(BlueprintCallable, Category = "Economy")
 	bool SpendGold(int32 Amount);
 
-	// ÇöÀç °ñµå·Î ±¸¸Å °¡´ÉÇÑÁö È®ÀÎ
+	// ì§€ì • ê¸ˆì•¡ì„ ì§€ë¶ˆí•  ìˆ˜ ìˆëŠ”ì§€ í™•ì¸
 	UFUNCTION(BlueprintPure, Category = "Economy")
 	bool CanAfford(int32 Amount) const;
 
-	// ÀúÀå µ¥ÀÌÅÍ¿¡¼­ º¹¿øÇÒ ¶§ »ç¿ë
+	// ì €ì¥ ë°ì´í„°ì—ì„œ ê³¨ë“œë¥¼ ë³µì›í•  ë•Œ ì‚¬ìš©
 	UFUNCTION(BlueprintCallable, Category = "Economy")
 	void SetGold(int32 NewGold);
 
@@ -46,16 +47,16 @@ public:
 	// Reputation
 	// ==============================================
 
-	// ÆÀ ÆòÆÇ
+	// í˜„ì¬ í‰íŒ
 	// -100 ~ 100
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Reputation, Category = "Reputation")
 	int32 Reputation;
 
-	// ÆòÆÇ Áõ°¨
+	// í‰íŒ ì¶”ê°€
 	UFUNCTION(BlueprintCallable, Category = "Reputation")
 	void AddReputation(int32 Amount);
 
-	// ÀúÀå µ¥ÀÌÅÍ¿¡¼­ º¹¿øÇÒ ¶§ »ç¿ë
+	// ì €ì¥ ë°ì´í„°ì—ì„œ í‰íŒì„ ë³µì›í•  ë•Œ ì‚¬ìš©
 	UFUNCTION(BlueprintCallable, Category = "Reputation")
 	void SetReputation(int32 NewReputation);
 
@@ -63,50 +64,121 @@ public:
 	// UI / BluePrintEvent
 	// ==============================================
 	
-	// °ñµå°¡ º¯°æµÇ¾úÀ» ¶§ BP¿¡¼­ UI °»½Å¿ë
+	// ê³¨ë“œê°€ ë³€ê²½ë˜ì—ˆì„ ë•Œ BPì—ì„œ UI ê°±ì‹ ìš©
 	UFUNCTION(BlueprintImplementableEvent, Category = "Economy")
 	void OnGoldUpdated(int32 NewGold);
 
-	// ÆòÆÇÀÌ º¯°æµÇ¾úÀ» ¶§ BP¿¡¼­ UI °»½Å¿ë
+	// í‰íŒì´ ë³€ê²½ë˜ì—ˆì„ ë•Œ BPì—ì„œ UI ê°±ì‹ ìš©
 	UFUNCTION(BlueprintImplementableEvent, Category = "Reputation")
 	void OnReputationUpdated(int32 NewReputation);
-
 
 	// ==============================================
 	// Debt
 	// ==============================================
 
-	// ÇöÀç °±¾Æ¾ßÇÏ´Â ºú
+	// ì´ˆê¸° ë¹š
+	UPROPERTY(BlueprintReadOnly, Category = "Economy|Debt")
+	int32 InitialDebt;
+
+	// í˜„ì¬ ê°šì•„ì•¼ í•˜ëŠ” ë¹š
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CurrentDebt, Category = "Economy|Debt")
 	int32 CurrentDebt;
 
-	// ´ÙÀ½ °±¾Æ¾ßÇÏ´Â ºú Áõ°¡ ¹èÀ²
+	// íšŒì°¨ë³„ ë¹š ì¦ê°€ ê¸°ë³¸ ê¸ˆì•¡
 	UPROPERTY(BlueprintReadOnly, Category = "Economy|Debt")
-	float DebtMultiplier;
+	int32 BaseDebtIncrease;
 
-	// ÇöÀç ¸î ¹øÂ° »óÈ¯ ÁÖ±âÀÎÁö
+	// ë¹š ì¦ê°€ ì†ë„ ì¡°ì ˆê°’
+	// ê°’ì´ í´ìˆ˜ë¡ í›„ë°˜ ë¹š ì¦ê°€ ì†ë„ê°€ ì™„ë§Œí•´ì§
+	UPROPERTY(BlueprintReadOnly, Category = "Economy|Debt")
+	float DebtGrowthDivisor;
+
+	// í˜„ì¬ ëª‡ ë²ˆì§¸ ìƒí™˜ íšŒì°¨ì¸ì§€
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_DebtCycle, Category = "Economy|Debt")
 	int32 DebtCycle;
 
-	// ÇöÀç ºúÀ» »óÈ¯
+	// í˜„ì¬ ìƒí™˜ íšŒì°¨ ê¸°ì¤€ ë¹š ì¦ê°€ëŸ‰ ê³„ì‚°
+	UFUNCTION(BlueprintPure, Category = "Economy|Debt")
+	int32 CalculateDebtIncrease() const;
+
+	// í˜„ì¬ ìƒí™˜ íšŒì°¨ ê¸°ì¤€ ë‹¤ìŒ ë¹š ê³„ì‚°
+	UFUNCTION(BlueprintPure, Category = "Economy|Debt")
+	int32 CalculateNextDebt() const;
+
+	// í˜„ì¬ ë¹š ìƒí™˜
 	UFUNCTION(BlueprintCallable, Category = "Economy|Debt")
 	bool PayDebt();
 
-	// ºú °ªÀ» Á÷Á¢ ¼³Á¤
+	// í˜„ì¬ ë¹š ì§ì ‘ ì„¤ì •
 	UFUNCTION(BlueprintCallable, Category = "Economy|Debt")
 	void SetCurrentDebt(int32 NewDebt);
 
-	// ºú »óÈ¯ ÁÖ±â¸¦ Á÷Á¢ ¼³Á¤
+	// ë¹š ìƒí™˜ íšŒì°¨ ì§ì ‘ ì„¤ì •
 	UFUNCTION(BlueprintCallable, Category = "Economy|Debt")
 	void SetDebtCycle(int32 NewDebtCycle);
 
-	// ºú º¯°æ½Ã UI °»½Å¿ë
+	// ë¹š ìƒí™˜ ê°€ëŠ¥ ì—¬ë¶€ë¥¼ í™•ì¸í•˜ê³  ì²˜ë¦¬ ê²°ê³¼ ë°˜í™˜
+	UFUNCTION(BlueprintCallable, Category = "Economy|Debt")
+	EDebtProcessResult ProcessDebtDeadline();
+
+	// ë¹š ë³€ê²½ ì‹œ UI ê°±ì‹ ìš©
 	UFUNCTION(BlueprintImplementableEvent, Category = "Economy|Debt")
 	void OnDebtUpdated(int32 NewDebt);
 
-	// ºú »óÈ¯ÁÖ±â º¯°æ ½Ã UI °»½Å¿ë
+	// ë¹š ìƒí™˜ íšŒì°¨ ë³€ê²½ ì‹œ UI ê°±ì‹ ìš©
 	UFUNCTION(BlueprintImplementableEvent, Category = "Economy|Debt")
 	void OnDebtCycleUpdated(int32 NewDebtCycle);
+
+	// ==============================================
+	// Economy Time
+	// ==============================================
+
+	// ê²½ì œ ì‹œê°„ ì‹œìŠ¤í…œì—ì„œ ì‚¬ìš©í•˜ëŠ” HalfDay
+	// ì„ì‹œ ê¸°ì¤€ìœ¼ë¡œ ë§µ ì´ë™ 1íšŒë‹¹ 1 ì¦ê°€
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_EconomyCurrentHalfDay, Category = "Economy|Time")
+	int32 EconomyCurrentHalfDay;
+
+	// ë¹š ìƒí™˜ ì£¼ê¸°
+	// í˜„ì¬ ì„ì‹œ ì‹œê°„ ê¸°ì¤€ 14 HalfDay = 7ì¼
+	// ì¶”í›„ ì‹¤ì œ í•˜ë£¨ ì‹œìŠ¤í…œ ì¶”ê°€ ì‹œ í•´ë‹¹ ì‹œê°„ ë‹¨ìœ„ì™€ ì—°ë™
+	UPROPERTY(BlueprintReadOnly, Category = "Economy|Time")
+	int32 DebtPeriodHalfDay;
+
+	// í˜„ì¬ ë¹š íšŒì°¨ê°€ ì‹œì‘ëœ HalfDay
+	// ìƒí™˜ ì„±ê³µ ì‹œ í˜„ì¬ EconomyCurrentHalfDayë¡œ ê°±ì‹ 
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Economy|Time")
+	int32 DebtCycleStartHalfDay;
+
+	// ê²½ì œ ì‹œê°„ 1 HalfDay ì¦ê°€
+	UFUNCTION(BlueprintCallable, Category = "Economy|Time")
+	void AdvanceEconomyHalfDay();
+
+	// í˜„ì¬ ê²½ì œ HalfDay ë°˜í™˜
+	UFUNCTION(BlueprintPure, Category = "Economy|Time")
+	int32 GetEconomyCurrentHalfDay() const;
+
+	// ê²½ì œ ì‹œê°„ì„ ì§ì ‘ ì„¤ì •
+	UFUNCTION(BlueprintCallable, Category = "Economy|Time")
+	void SetEconomyCurrentHalfDay(int32 NewHalfDay);
+
+	// í˜„ì¬ ë¹š íšŒì°¨ì˜ ë‹¤ìŒ ìƒí™˜ ì‹œì  ë°˜í™˜
+	// ë¹š íšŒì°¨ ì‹œì‘ HalfDay + 14 HalfDay(7ì¼)
+	UFUNCTION(BlueprintPure, Category = "Economy|Time")
+	int32 GetNextDebtDueHalfDay() const;
+
+	// í˜„ì¬ ê²½ì œ ì‹œê°„ì´ ë‹¤ìŒ ìƒí™˜ ì‹œì  ì´ìƒì¸ì§€ í™•ì¸
+	// trueì´ë©´ ë¹š ìƒí™˜ ì²˜ë¦¬ í•„ìš”
+	UFUNCTION(BlueprintPure, Category = "Economy|Time")
+	bool IsDebtDue() const;
+
+	// ë‹¤ìŒ ë¹š ìƒí™˜ê¹Œì§€ ë‚¨ì€ HalfDay ë°˜í™˜
+	// ì´ë¯¸ ê¸°í•œì— ë„ë‹¬í•œ ê²½ìš° 0 ë°˜í™˜
+	UFUNCTION(BlueprintPure, Category = "Economy|Time")
+	int32 GetRemainingDebtHalfDay() const;
+
+	// ê²½ì œ ì‹œê°„ ë³€ê²½ ì‹œ BP/UI ê°±ì‹ ìš©
+	UFUNCTION(BlueprintImplementableEvent, Category = "Economy|Time")
+	void OnEconomyHalfDayUpdated(int32 NewHalfDay);
 
 protected:
 	UFUNCTION()
@@ -121,6 +193,10 @@ protected:
 	UFUNCTION()
 	void OnRep_DebtCycle();
 
+	UFUNCTION()
+	void OnRep_EconomyCurrentHalfDay();
+
 	virtual void GetLifetimeReplicatedProps(
 		TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 };
+

@@ -139,6 +139,15 @@ namespace MOU
 		/** 이 사람이 지금 들어가 있는 방. 없으면 0. */
 		uint32_t FindRoomOf(uint64_t UserId);
 
+		/**
+		 * 이 사람이 들어가 있는 방의 진행 상태. 어느 방에도 없으면 false.
+		 *
+		 * ★ 친구 접속 상태(EPresence)를 정하려고 v7 에서 추가했다.
+		 *   FindRoomOf 로 방 번호를 얻고 상태를 다시 묻는 2단계로 하면 그 사이에
+		 *   방이 사라져 판정이 흔들린다 - 한 번의 락 안에서 끝내야 한다.
+		 */
+		bool GetRoomStateOf(uint64_t UserId, ERoomState& OutState);
+
 		/** 대기 중인 방들을 최신순으로 담아준다. 꽉 찬 방과 시작된 방은 빼고 준다. */
 		void ListWaiting(std::vector<RoomInfo>& Out, size_t MaxCount);
 

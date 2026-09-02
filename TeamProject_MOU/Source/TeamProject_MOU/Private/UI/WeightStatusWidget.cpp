@@ -30,15 +30,16 @@ void UWeightStatusWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 	FLinearColor FinalFrameColor = CurrentColor;
 	FLinearColor FinalBarColor = CurrentColor;
 
-	// 2. 초과 2 (100% 초과) 상태 시 펄스(Blink/Pulse) 네온 연출
-	if (CurrentGrade == EWeightGrade::Critical)
+	// 2. 초과 상태(100% 이상: Overload1, Overload2, Overload3) 시 펄스(Blink/Pulse) 네온 연출
+	bool bIsOverloaded = (CurrentGrade == EWeightGrade::Overload1 || CurrentGrade == EWeightGrade::Overload2 || CurrentGrade == EWeightGrade::Overload3);
+	if (bIsOverloaded)
 	{
 		PulseTime += InDeltaTime * PulseSpeed;
 		float PulseAlpha = (FMath::Sin(PulseTime) + 1.0f) * 0.5f; // 0.0 ~ 1.0
 
-		// 빨간색과 밝은 다홍/화이트 사이를 주기적으로 진동
-		FinalFrameColor = FMath::Lerp(Color_Critical, FLinearColor(1.0f, 0.4f, 0.4f, 1.0f), PulseAlpha * 0.6f);
-		FinalBarColor = FMath::Lerp(Color_Critical, FLinearColor(1.0f, 0.6f, 0.6f, 1.0f), PulseAlpha * 0.5f);
+		// 현재 초과 색상과 밝은 화이트/레드 사이를 주기적으로 진동
+		FinalFrameColor = FMath::Lerp(CurrentColor, FLinearColor(1.0f, 0.4f, 0.4f, 1.0f), PulseAlpha * 0.6f);
+		FinalBarColor = FMath::Lerp(CurrentColor, FLinearColor(1.0f, 0.6f, 0.6f, 1.0f), PulseAlpha * 0.5f);
 	}
 	else
 	{
@@ -59,10 +60,10 @@ void UWeightStatusWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 		Image_Frame->SetColorAndOpacity(FinalFrameColor);
 	}
 
-	// 5. 로봇 얼굴 표정: 평소에는 원본 색상(White) 유지, 초과 2 상태에서만 펄스 애니메이션 효과 적용
+	// 5. 로봇 얼굴 표정: 평소에는 원본 색상(White) 유지, 초과 상태에서만 펄스 애니메이션 효과 적용
 	if (Image_FacePortrait)
 	{
-		if (CurrentGrade == EWeightGrade::Critical)
+		if (bIsOverloaded)
 		{
 			Image_FacePortrait->SetColorAndOpacity(FinalFrameColor);
 		}
@@ -100,28 +101,7 @@ void UWeightStatusWidget::ForceUpdateWeight(float NewCurrentWeight, float NewMax
 
 void UWeightStatusWidget::CalculateWeightGrade(float Ratio)
 {
-	EWeightGrade NewGrade;
-
-	if (Ratio > 1.0f)
-	{
-		NewGrade = EWeightGrade::Critical; // 초과 2 (100%~)
-	}
-	else if (Ratio > 0.75f)
-	{
-		NewGrade = EWeightGrade::Overload; // 초과 (75~100%)
-	}
-	else if (Ratio > 0.50f)
-	{
-		NewGrade = EWeightGrade::Heavy;    // 무거움 (50~75%)
-	}
-	else if (Ratio > 0.25f)
-	{
-		NewGrade = EWeightGrade::Normal;   // 적당 (25~50%)
-	}
-	else
-	{
-		NewGrade = EWeightGrade::Light;    // 가벼움 (0~25%)
-	}
+	EWeightGrade NewGrade = UCharacterVisualDataAsset::CalculateWeightGrade(Ratio);
 
 	if (CurrentGrade != NewGrade)
 	{
@@ -146,19 +126,29 @@ void UWeightStatusWidget::ApplyGradeAppearance(EWeightGrade Grade)
 		FaceTextureToSet = Tex_Face_Normal;
 		break;
 
+	case EWeightGrade::SlightlyHeavy:
+		TargetColor = Color_SlightlyHeavy;
+		FaceTextureToSet = Tex_Face_SlightlyHeavy;
+		break;
+
 	case EWeightGrade::Heavy:
 		TargetColor = Color_Heavy;
 		FaceTextureToSet = Tex_Face_Heavy;
 		break;
 
-	case EWeightGrade::Overload:
-		TargetColor = Color_Overload;
-		FaceTextureToSet = Tex_Face_Overload;
+	case EWeightGrade::Overload1:
+		TargetColor = Color_Overload1;
+		FaceTextureToSet = Tex_Face_Overload1;
 		break;
 
-	case EWeightGrade::Critical:
-		TargetColor = Color_Critical;
-		FaceTextureToSet = Tex_Face_Critical;
+	case EWeightGrade::Overload2:
+		TargetColor = Color_Overload2;
+		FaceTextureToSet = Tex_Face_Overload2;
+		break;
+
+	case EWeightGrade::Overload3:
+		TargetColor = Color_Overload3;
+		FaceTextureToSet = Tex_Face_Overload3;
 		break;
 	}
 

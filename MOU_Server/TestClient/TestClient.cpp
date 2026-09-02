@@ -79,6 +79,48 @@ namespace
 		}
 	}
 
+	// --- 친구 (v7) 표시용 이름 ---
+
+	const char* FriendStateName(uint8_t State)
+	{
+		switch (static_cast<EFriendState>(State))
+		{
+		case EFriendState::Friend:          return "친구";
+		case EFriendState::PendingOutgoing: return "신청함(대기)";
+		case EFriendState::PendingIncoming: return "신청받음";
+		default:                            return "?";
+		}
+	}
+
+	const char* PresenceName(uint8_t Presence)
+	{
+		switch (static_cast<EPresence>(Presence))
+		{
+		case EPresence::Offline: return "오프라인";
+		case EPresence::Online:  return "온라인";
+		case EPresence::InGame:  return "게임중";
+		default:                 return "?";
+		}
+	}
+
+	const char* FriendResultName(uint8_t Result)
+	{
+		switch (static_cast<EFriendResult>(Result))
+		{
+		case EFriendResult::Success:        return "성공";
+		case EFriendResult::NotAuthed:      return "로그인 안 됨";
+		case EFriendResult::NotFound:       return "그런 닉네임 없음";
+		case EFriendResult::AmbiguousName:  return "동명이인 여러 명";
+		case EFriendResult::AlreadyFriend:  return "이미 친구";
+		case EFriendResult::AlreadyPending: return "이미 신청함";
+		case EFriendResult::SelfRequest:    return "자기 자신";
+		case EFriendResult::LimitReached:   return "친구 수 상한";
+		case EFriendResult::InvalidFormat:  return "형식 오류";
+		case EFriendResult::DbError:        return "DB 오류";
+		default:                            return "?";
+		}
+	}
+
 	// 채팅 패킷 하나를 완성된 바이트 배열로 만든다.
 	// 테스트 모드에서 이 바이트열을 마음대로 쪼개거나 붙여서 보낸다.
 	std::vector<char> BuildChatPacket(EChatChannel Channel, const std::string& Text)
@@ -310,6 +352,145 @@ namespace
 					}
 					break;
 
+				// --- 친구 (v7) ---
+				case EOpcode::FriendListAck:
+					if (Body.size() >= sizeof(FriendListAckBody))
+					{
+						FriendListAckBody Head{};
+						std::memcpy(&Head, Body.data(), sizeof(Head));
+
+						std::printf("[친구] %u명\n", Head.Count);
+
+						const char* Cur = Body.data() + sizeof(Head);
+						const size_t Avail = Body.size() - sizeof(Head);
+
+						for (uint16_t i = 0; i < Head.Count; ++i)
+						{
+							if ((i + 1) * sizeof(FriendEntry) > Avail) { break; }
+
+							FriendEntry E{};
+							std::memcpy(&E, Cur + i * sizeof(FriendEntry), sizeof(E));
+
+							std::printf("   %-16s id=%-4llu %-16s %-9s%s\n",
+							            ReadFixedString(E.Nickname, kMaxNameLen).c_str(),
+							            static_cast<unsigned long long>(E.UserId),
+							            FriendStateName(E.State),
+							            PresenceName(E.Presence),
+							            E.UnreadCount ? "  [안읽음]" : "");
+						}
+					}
+					break;
+
+				case EOpcode::FriendAddAck:
+					if (Body.size() >= sizeof(FriendAddAckBody))
+					{
+						FriendAddAckBody Ack{};
+						std::memcpy(&Ack, Body.data(), sizeof(Ack));
+						std::printf("[친구] 신청 %s (%s) target=%llu\n",
+						            Ack.bSuccess ? "성공" : "실패",
+						            FriendResultName(Ack.Result),
+						            static_cast<unsigned long long>(Ack.TargetUserId));
+					}
+					break;
+
+				case EOpcode::FriendRequestIncoming:
+					if (Body.size() >= sizeof(FriendRequestIncomingBody))
+					{
+						FriendRequestIncomingBody Note{};
+						std::memcpy(&Note, Body.data(), sizeof(Note));
+						std::printf("[친구] ★ %s (id=%llu) 님이 친구 신청을 보냈습니다. "
+						            "/accept %llu 또는 /decline %llu\n",
+						            ReadFixedString(Note.FromNickname, kMaxNameLen).c_str(),
+						            static_cast<unsigned long long>(Note.FromUserId),
+						            static_cast<unsigned long long>(Note.FromUserId),
+						            static_cast<unsigned long long>(Note.FromUserId));
+					}
+					break;
+
+				case EOpcode::FriendUpdate:
+					if (Body.size() >= sizeof(FriendUpdateBody))
+					{
+						FriendUpdateBody U{};
+						std::memcpy(&U, Body.data(), sizeof(U));
+						if (U.bRemoved)
+						{
+							std::printf("[친구] - %s (id=%llu) 목록에서 제거\n",
+							            ReadFixedString(U.Nickname, kMaxNameLen).c_str(),
+							            static_cast<unsigned long long>(U.UserId));
+						}
+						else
+						{
+							std::printf("[친구] + %s (id=%llu) %s / %s\n",
+							            ReadFixedString(U.Nickname, kMaxNameLen).c_str(),
+							            static_cast<unsigned long long>(U.UserId),
+							            FriendStateName(U.State),
+							            PresenceName(U.Presence));
+						}
+					}
+					break;
+
+				case EOpcode::DmHistoryAck:
+					if (Body.size() >= sizeof(DmHistoryAckBody))
+					{
+						DmHistoryAckBody Ack{};
+						std::memcpy(&Ack, Body.data(), sizeof(Ack));
+
+						std::printf("[기록] peer=%llu %u개%s\n",
+						            static_cast<unsigned long long>(Ack.PeerUserId),
+						            Ack.Count, Ack.bHasMore ? " (더 있음)" : "");
+
+						// ★ DmEntry 는 가변 길이다. 인덱싱이 아니라 순회로 읽는다.
+						size_t Off = sizeof(Ack);
+						for (uint16_t i = 0; i < Ack.Count; ++i)
+						{
+							if (Off + sizeof(DmEntry) > Body.size()) { break; }
+
+							DmEntry E{};
+							std::memcpy(&E, Body.data() + Off, sizeof(E));
+							Off += sizeof(E);
+
+							if (Off + E.TextLen > Body.size()) { break; }
+
+							std::printf("   #%llu from=%llu: %.*s\n",
+							            static_cast<unsigned long long>(E.MessageId),
+							            static_cast<unsigned long long>(E.FromUserId),
+							            static_cast<int>(E.TextLen), Body.data() + Off);
+							Off += E.TextLen;
+						}
+					}
+					break;
+
+				case EOpcode::DirectMessage:
+					if (Body.size() >= sizeof(DirectMessageBody))
+					{
+						DirectMessageBody M{};
+						std::memcpy(&M, Body.data(), sizeof(M));
+						const char* Text = Body.data() + sizeof(M);
+
+						// 본문 길이를 실제 도착량으로 자른다. 서버를 믿더라도
+						// 여기서 넘치면 남의 메모리를 읽는다.
+						const size_t Avail = Body.size() - sizeof(M);
+						const size_t Len = (M.TextLen <= Avail) ? M.TextLen : Avail;
+
+						std::printf("[DM] #%llu %llu -> %llu: %.*s\n",
+						            static_cast<unsigned long long>(M.MessageId),
+						            static_cast<unsigned long long>(M.FromUserId),
+						            static_cast<unsigned long long>(M.ToUserId),
+						            static_cast<int>(Len), Text);
+					}
+					break;
+
+				case EOpcode::FriendPresence:
+					if (Body.size() >= sizeof(FriendPresenceBody))
+					{
+						FriendPresenceBody P{};
+						std::memcpy(&P, Body.data(), sizeof(P));
+						std::printf("[상태] id=%llu -> %s\n",
+						            static_cast<unsigned long long>(P.UserId),
+						            PresenceName(P.Presence));
+					}
+					break;
+
 				default:
 					std::printf("[수신] 오피코드 %u (%zu바이트)\n",
 					            Header.Opcode, Body.size());
@@ -496,6 +677,14 @@ namespace
 		std::printf("  /go                          게임 시작 요청 (방장용, 전원 준비 필요)\n");
 		std::printf("  /hostready                   리슨서버를 열었다고 신고 (방장용, /go 다음)\n");
 		std::printf("  /close                       내 방 닫기\n");
+		std::printf("  --- 친구 (v7) ---\n");
+		std::printf("  /friends                     친구 목록 (신청 대기 포함)\n");
+		std::printf("  /add <닉네임>                친구 신청\n");
+		std::printf("  /accept <userId>             받은 신청 수락\n");
+		std::printf("  /decline <userId>            받은 신청 거절\n");
+		std::printf("  /unfriend <userId>           친구 삭제 / 보낸 신청 취소\n");
+		std::printf("  /dm <userId> <본문>          1:1 메시지 (친구만)\n");
+		std::printf("  /hist <userId> [before]      대화 기록 (before 생략=최신+읽음처리)\n");
 		std::printf("  /q        종료\n\n");
 
 		EChatChannel Current = EChatChannel::All;
@@ -566,6 +755,75 @@ namespace
 				continue;
 			}
 			if (Line == "/close")      { SendPacket(GSock, EOpcode::RoomLeaveReq, nullptr, 0); continue; }
+
+			// --- 친구 (v7) ---
+			if (Line == "/friends")
+			{
+				SendPacket(GSock, EOpcode::FriendListReq, nullptr, 0);
+				continue;
+			}
+			if (Line.rfind("/add ", 0) == 0)
+			{
+				FriendAddReqBody Req{};
+				// 닉네임을 그대로 넣는다. 파싱(나중의 '#태그')은 서버가 한다.
+				CopyFixedString(Req.Query, kMaxFriendQueryLen, Line.substr(5));
+				SendPacket(GSock, EOpcode::FriendAddReq, &Req, sizeof(Req));
+				continue;
+			}
+			if (Line.rfind("/accept ", 0) == 0 || Line.rfind("/decline ", 0) == 0)
+			{
+				const bool bAccept = (Line[1] == 'a');
+				FriendRespondReqBody Req{};
+				Req.FromUserId = std::strtoull(Line.c_str() + (bAccept ? 8 : 9), nullptr, 10);
+				Req.bAccept    = bAccept ? 1 : 0;
+				SendPacket(GSock, EOpcode::FriendRespondReq, &Req, sizeof(Req));
+				continue;
+			}
+			if (Line.rfind("/unfriend ", 0) == 0)
+			{
+				FriendRemoveReqBody Req{};
+				Req.TargetUserId = std::strtoull(Line.c_str() + 10, nullptr, 10);
+				SendPacket(GSock, EOpcode::FriendRemoveReq, &Req, sizeof(Req));
+				continue;
+			}
+			if (Line.rfind("/hist ", 0) == 0)
+			{
+				// /hist <userId> [beforeMessageId]
+				DmHistoryReqBody Req{};
+				const char* P = Line.c_str() + 6;
+				char* End = nullptr;
+				Req.PeerUserId      = std::strtoull(P, &End, 10);
+				Req.BeforeMessageId = (End && *End) ? std::strtoull(End, nullptr, 10) : 0;
+				SendPacket(GSock, EOpcode::DmHistoryReq, &Req, sizeof(Req));
+				continue;
+			}
+			if (Line.rfind("/dm ", 0) == 0)
+			{
+				// /dm <userId> <본문>
+				const size_t IdStart = 4;
+				const size_t Space   = Line.find(' ', IdStart);
+				if (Space == std::string::npos)
+				{
+					std::printf("사용법: /dm <userId> <본문>\n");
+					continue;
+				}
+
+				const std::string TextPart = Line.substr(Space + 1);
+				if (TextPart.empty() || TextPart.size() > kMaxTextLen)
+				{
+					std::printf("본문이 비었거나 너무 길다\n");
+					continue;
+				}
+
+				DirectMessageSendBody Head{};
+				Head.TargetUserId = std::strtoull(Line.c_str() + IdStart, nullptr, 10);
+				Head.TextLen      = static_cast<uint16_t>(TextPart.size());
+
+				SendPacket2(GSock, EOpcode::DirectMessageSend,
+				            &Head, sizeof(Head),
+				            TextPart.data(), static_cast<uint32_t>(TextPart.size()));
+				continue;
+			}
 
 			const std::vector<char> Packet = BuildChatPacket(Current, Line);
 			if (!SendAll(GSock, Packet.data(), static_cast<int32_t>(Packet.size())))

@@ -3,6 +3,8 @@
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/Character.h"
 #include "Components/CarryingComponent.h"
+#include "Subsystems/WarehouseDataSubsystem.h"
+#include "TimerManager.h"
 
 UInventoryComponent::UInventoryComponent()
 {
@@ -18,6 +20,23 @@ void UInventoryComponent::BeginPlay()
 	{
 		// 슬롯 초기화
 		InventorySlots.Init(nullptr, MaxSlots);
+		GetWorld()->GetTimerManager().SetTimerForNextTick(this, &UInventoryComponent::TryRestoreSavedInventory);
+	}
+}
+
+void UInventoryComponent::TryRestoreSavedInventory()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !GetWorld()) return;
+
+	if (UWarehouseDataSubsystem* WarehouseSubsystem = GetWorld()->GetGameInstance()->GetSubsystem<UWarehouseDataSubsystem>())
+	{
+		if (WarehouseSubsystem->RestorePlayerInventory(this)) return;
+	}
+
+	// Spawn 직후 PlayerState가 아직 연결되지 않은 경우를 위해 제한적으로 재시도합니다.
+	if (++InventoryRestoreAttempts < 60)
+	{
+		GetWorld()->GetTimerManager().SetTimerForNextTick(this, &UInventoryComponent::TryRestoreSavedInventory);
 	}
 }
 

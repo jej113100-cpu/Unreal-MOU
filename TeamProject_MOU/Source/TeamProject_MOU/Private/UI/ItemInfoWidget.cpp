@@ -49,4 +49,7 @@ void UItemInfoWidget::UpdateItemInfo(AItemBase* Item)
 			Text_Value->SetVisibility(ESlateVisibility::Collapsed);
 		}
 	}
+
+	// 블루프린트 이벤트 호출
+	OnItemInfoUpdated(Item);
 }

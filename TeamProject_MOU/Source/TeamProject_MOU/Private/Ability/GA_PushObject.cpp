@@ -57,22 +57,16 @@ void UGA_PushObject::ActivateAbility(const FGameplayAbilitySpecHandle Handle, co
 		Context.AddSourceObject(Char);
 		ActivePushEffectHandle = ASC->ApplyGameplayEffectToSelf(PushEffectClass.GetDefaultObject(), 1.0f, Context);
 	}
-	else if (UBaseAttributeSet* Attr = GetBaseAttributeSet())
+	else if (Char && HasAuthority(&ActivationInfo))
 	{
-		if (HasAuthority(&ActivationInfo) && Char)
-		{
-			float PushSpeed = Char->GetCalculatedWalkSpeed();
-			Attr->SetMoveSpeed(PushSpeed);
-			if (Char->GetCharacterMovement())
-			{
-				Char->GetCharacterMovement()->MaxWalkSpeed = PushSpeed;
-			}
-		}
+		Char->UpdateCharacterSpeed();
 	}
 }
 
 void UGA_PushObject::EndAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, bool bReplicateEndAbility, bool bWasCancelled)
 {
+	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+
 	UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo();
 	ACharacterBase* Char = GetCharacterFromActorInfo();
 
@@ -81,23 +75,14 @@ void UGA_PushObject::EndAbility(const FGameplayAbilitySpecHandle Handle, const F
 		ASC->RemoveActiveGameplayEffect(ActivePushEffectHandle);
 		ActivePushEffectHandle.Invalidate();
 	}
-	else if (UBaseAttributeSet* Attr = GetBaseAttributeSet())
+
+	if (Char && HasAuthority(&ActivationInfo))
 	{
-		if (HasAuthority(&ActivationInfo) && Char)
-		{
-			float BaseSpeed = Char->GetCalculatedWalkSpeed();
-			Attr->SetMoveSpeed(BaseSpeed);
-			if (Char->GetCharacterMovement())
-			{
-				Char->GetCharacterMovement()->MaxWalkSpeed = BaseSpeed;
-			}
-		}
+		Char->UpdateCharacterSpeed();
 	}
 
 	if (Char && Char->GetCharacterMovement())
 	{
 		Char->GetCharacterMovement()->bOrientRotationToMovement = bOriginalOrientRotation;
 	}
-
-	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 }

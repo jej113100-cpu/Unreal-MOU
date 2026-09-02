@@ -6,6 +6,8 @@
 #include "Abilities/GameplayAbility.h"
 #include "AIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "StatusEffect/StatusEffectAbilitySetDataAsset.h"
 #include "StatusEffect/StatusEffectDataAsset.h"
@@ -19,6 +21,26 @@ UStatusComponent::UStatusComponent()
 	if (NPCActionTag.IsValid())
 	{
 		AbilityTagsToCancelOnMovementBlockingCC.AddTag(NPCActionTag);
+	}
+
+	const FName DefaultBlockingTagNames[] =
+	{
+		TEXT("State.Stunned"),
+		TEXT("State.ElectricShock"),
+		TEXT("State.Knockdown"),
+		TEXT("State.KnockedBack"),
+		TEXT("State.Primary.Stuned"),
+		TEXT("State.Held"),
+		TEXT("State.Player.Held")
+	};
+
+	for (const FName& TagName : DefaultBlockingTagNames)
+	{
+		const FGameplayTag BlockingTag = FGameplayTag::RequestGameplayTag(TagName, false);
+		if (BlockingTag.IsValid())
+		{
+			MovementBlockingCCTags.AddTag(BlockingTag);
+		}
 	}
 }
 
@@ -174,6 +196,11 @@ void UStatusComponent::RefreshCrowdControlledBlackboard()
 		CancelAbilitiesBlockedByCrowdControl();
 	}
 
+	if (bCrowdControlStateChanged)
+	{
+		ApplyMovementBlockedState(bIsMovementBlocked);
+	}
+
 	APawn* OwnerPawn = Cast<APawn>(GetOwner());
 	AAIController* AIController = OwnerPawn ? Cast<AAIController>(OwnerPawn->GetController()) : nullptr;
 	if (AIController)
@@ -194,6 +221,44 @@ void UStatusComponent::RefreshCrowdControlledBlackboard()
 	if (bCrowdControlStateChanged)
 	{
 		OnCrowdControlChanged.Broadcast(bIsMovementBlocked);
+	}
+}
+
+void UStatusComponent::ApplyMovementBlockedState(bool bShouldBlockMovement)
+{
+	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
+	if (!OwnerCharacter)
+	{
+		return;
+	}
+
+	UCharacterMovementComponent* MovementComponent = OwnerCharacter->GetCharacterMovement();
+	if (!MovementComponent)
+	{
+		return;
+	}
+
+	// CC 시작/종료 시점 모두 잔여 속도와 누적 입력을 제거해 해제 순간 튀어나가는 현상을 막습니다.
+	MovementComponent->StopMovementImmediately();
+	OwnerCharacter->ConsumeMovementInputVector();
+
+	if (bShouldBlockMovement)
+	{
+		if (!bMovementModeOverriddenByCC)
+		{
+			PreviousMovementMode = MovementComponent->MovementMode;
+			PreviousCustomMovementMode = MovementComponent->CustomMovementMode;
+			bMovementModeOverriddenByCC = true;
+		}
+
+		MovementComponent->DisableMovement();
+		return;
+	}
+
+	if (bMovementModeOverriddenByCC)
+	{
+		MovementComponent->SetMovementMode(PreviousMovementMode, PreviousCustomMovementMode);
+		bMovementModeOverriddenByCC = false;
 	}
 }
 

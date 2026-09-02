@@ -1,8 +1,12 @@
 #include "Base/PackageBase.h"
 #include "Base/CharacterBase.h"
 #include "Base/BaseAttributeSet.h"
+#include "Item/PackageItemSaveData.h"
+#include "Interfaces/QuestItemSaveInterface.h"
 #include "AbilitySystemComponent.h"
 #include "Components/CarryingComponent.h"
+#include "Components/CharacterVisualComponent.h"
+#include "Data/CharacterVisualDataAsset.h"
 #include "Components/CapsuleComponent.h"
 #include "Player/MainCharacter.h"
 #include "GameFramework/Character.h"
@@ -21,6 +25,8 @@ APackageBase::APackageBase()
 
 	Handle_Back = CreateDefaultSubobject<USceneComponent>(TEXT("Handle_Back"));
 	Handle_Back->SetupAttachment(RootComponent);
+
+	MaxCarryDistance = 80.0f;
 }
 
 void APackageBase::BeginPlay()
@@ -28,6 +34,29 @@ void APackageBase::BeginPlay()
 	Super::BeginPlay();
 	
 	CurrentSpoilTime = MaxSpoilTime;
+}
+
+bool APackageBase::CanBePickedUpBy(AActor* PotentialPicker) const
+{
+	if (!PotentialPicker)
+	{
+		return false;
+	}
+
+	// 이미 본인이 들고 있는 경우 중복 줍기 불가
+	if (CurrentCarriers.Contains(PotentialPicker))
+	{
+		return false;
+	}
+
+	// 무거운 택배(Heavy)의 경우 최대 2명까지 허용
+	if (PackageType == EPackageType::Heavy)
+	{
+		return CurrentCarriers.Num() < 2;
+	}
+
+	// 일반 물품은 다른 사람이 1명이라도 들고 있으면 줍기 불가 (가로채기 차단)
+	return CurrentCarriers.Num() == 0 && GetAttachParentActor() == nullptr;
 }
 
 void APackageBase::PostInitializeComponents()
@@ -72,29 +101,66 @@ void APackageBase::Tick(float DeltaTime)
 			UpdateHeavyPackagePosition(DeltaTime);
 		}
 
-		// [협동 이탈 검사] 전환 유예 중에는 검사 스킵 (강제 드랍 연쇄 방지)
-		if (CurrentCarriers.Num() > 0 && TransitionGracePeriod <= 0.0f)
+		// [각자 잡고 있는 손잡이 기준 80cm 이탈 검사] 전환 유예가 끝난 상태에서 운반자가 본인 손잡이에서 80cm 이상 멀어지면 놓침
+		if (TransitionGracePeriod <= 0.0f)
 		{
-			TArray<AActor*> CarriersToDrop;
-			for (AActor* Carrier : CurrentCarriers)
+			if (PackageType == EPackageType::Heavy && CurrentCarriers.Num() >= 2)
 			{
-				if (FVector::DistXY(Carrier->GetActorLocation(), GetActorLocation()) > MaxCarryDistance)
+				TArray<AActor*> CarriersToDrop;
+
+				for (int32 i = 0; i < CurrentCarriers.Num(); ++i)
 				{
-					CarriersToDrop.Add(Carrier);
+					AActor* Carrier = CurrentCarriers[i];
+					if (!Carrier) continue;
+
+					USceneComponent* HandleComp = (i == 0) ? Handle_Front.Get() : Handle_Back.Get();
+					FVector TargetHandlePos = HandleComp ? HandleComp->GetComponentLocation() : GetActorLocation();
+
+					// 운반자의 손 위치 (신체 중심 + 앞쪽 30cm)
+					FVector CarrierHandPos = Carrier->GetActorLocation() + Carrier->GetActorForwardVector() * 30.0f;
+
+					// 2D 수평 거리(XY)로 손과 손잡이 사이의 거리 측정 (Z축 높이 차이로 인한 즉시 풀림 방지)
+					float DistFromHandle = FVector::DistXY(CarrierHandPos, TargetHandlePos);
+
+					const float AllowedTolerance = FMath::Min(MaxCarryDistance, 80.0f);
+					if (DistFromHandle > AllowedTolerance)
+					{
+						CarriersToDrop.Add(Carrier);
+						UE_LOG(LogTemp, Warning, TEXT("[%s] 운반자 %d(%s)가 손잡이에서 %fcm 멀어져(허용 %fcm) 택배를 놓칩니다!"), 
+							*GetName(), i, *Carrier->GetName(), DistFromHandle, AllowedTolerance);
+					}
+				}
+
+				for (AActor* Carrier : CarriersToDrop)
+				{
+					if (UCarryingComponent* CarryComp = Carrier->FindComponentByClass<UCarryingComponent>())
+					{
+						CarryComp->GrabOrDrop();
+					}
+					else
+					{
+						RemoveCarrier(Carrier);
+					}
 				}
 			}
-
-			for (AActor* Carrier : CarriersToDrop)
+			else if (CurrentCarriers.Num() == 1)
 			{
-				if (UCarryingComponent* CarryComp = Carrier->FindComponentByClass<UCarryingComponent>())
+				// 1인 드래그 시: 박스와 캐릭터의 수평 거리가 200cm를 초과할 때만 드랍
+				AActor* Carrier = CurrentCarriers[0];
+				if (Carrier)
 				{
-					CarryComp->GrabOrDrop();
+					if (FVector::DistXY(Carrier->GetActorLocation(), GetActorLocation()) > 200.0f)
+					{
+						if (UCarryingComponent* CarryComp = Carrier->FindComponentByClass<UCarryingComponent>())
+						{
+							CarryComp->GrabOrDrop();
+						}
+						else
+						{
+							RemoveCarrier(Carrier);
+						}
+					}
 				}
-				else
-				{
-					RemoveCarrier(Carrier);
-				}
-				UE_LOG(LogTemp, Warning, TEXT("[%s] 운반자가 너무 멀어져 택배를 놓쳓습니다!"), *Carrier->GetName());
 			}
 		}
 
@@ -152,59 +218,64 @@ void APackageBase::UpdateHeavyPackagePosition(float DeltaTime)
 		// [오프셋 제거] 아까 추가했던 좌우 보정(SideOffset)이 오히려 중앙 정렬을 방해했으므로 완전히 제거합니다.
 		// DragPos는 캐릭터의 소켓 위치를 그대로 사용합니다.
 
-		// 핵심 수정: 택배가 캐릭터 뒤쪽으로 뻗도록 Yaw를 180도 뒤집습니다. (그림 2 방향 복구)
-		FRotator DragRot = FrontCarrier->GetActorRotation();
-		DragRot.Yaw += 180.0f;  // 캐릭터 등 뒤로 끌리도록 회전 복구!
-		DragRot.Pitch = -20.0f; // 손잡이(앞)는 캐릭터에, 꼬리(뒤)는 바닥으로 처지는 각도
+		// 1인 드래그 회전: 
+		// 1. 캐릭터 등 뒤(+180) 및 지면 경사(-20 Pitch)로 기본 드래그 쿼터니언 계산 (수평 Roll 0 고정)
+		FRotator WorldDragRot = FrontCarrier->GetActorRotation();
+		WorldDragRot.Yaw += 180.0f;
+		WorldDragRot.Pitch = -20.0f;
+		WorldDragRot.Roll = 0.0f;
+
+		// 2. 메쉬 자체의 로컬 회전 오프셋(SingleCarryRotationOffset, 예: Yaw -90)을 먼저 적용한 후 월드 드래그 방향으로 눕힘
+		// 이렇게 쿼터니언으로 합성해야 Yaw를 돌렸을 때 Pitch(기울기)가 Roll(옆으로 눕기)로 왜곡되지 않고 정상적으로 바닥으로 처집니다!
+		FQuat FinalDragQuat = WorldDragRot.Quaternion() * SingleCarryRotationOffset.Quaternion();
+		FRotator DragRot = FinalDragQuat.Rotator();
 
 		// DragSocket 위치에서 Handle_Front 오프셋만큼 역방향으로 밀어 패키지 원점 계산
-		FQuat PackageQuat = DragRot.Quaternion();
-		FVector RotatedHF = PackageQuat.RotateVector(HFLocal);
+		FVector RotatedHF = FinalDragQuat.RotateVector(HFLocal);
 		FVector NewPackageLoc = DragPos - RotatedHF;
 
 		SetActorLocationAndRotation(NewPackageLoc, DragRot, false, nullptr, ETeleportType::None);
 	}
 	else if (CurrentCarriers.Num() >= 2)
 	{
-		// [2인 운반] Handle_Front = 앞사람 손, Handle_Back = 뒷사람 손
+		// [2인 운반] 두 운반자의 위치를 기반으로 안정적으로 박스 위치/회전 계산 (떨림 방지)
 		AActor* BackCarrier = CurrentCarriers[1];
 		if (!BackCarrier) return;
 
 		ACharacter* BackChar = Cast<ACharacter>(BackCarrier);
-		if (!BackChar || !BackChar->GetMesh()) return;
+		if (!BackChar) return;
 
-		FVector BackHandPos;
-		if (BackChar->GetMesh()->DoesSocketExist(CarrySocketName))
-		{
-			BackHandPos = BackChar->GetMesh()->GetSocketLocation(CarrySocketName);
-		}
-		else
-		{
-			BackHandPos = BackCarrier->GetActorLocation()
-				+ BackCarrier->GetActorForwardVector() * 60.0f
-				+ FVector(0, 0, 30.0f);
-		}
+		// 손 소켓의 애니메이션 미세 진동으로 인한 흔들림을 방지하기 위해 신체 기준 안정적 높이 위치 사용
+		FVector FrontPos = FrontCarrier->GetActorLocation() + FrontCarrier->GetActorForwardVector() * 30.0f + FVector(0, 0, 30.0f);
+		FVector BackPos = BackCarrier->GetActorLocation() + BackCarrier->GetActorForwardVector() * 30.0f + FVector(0, 0, 30.0f);
 
-		// 패키지 회전: 앞사람 손 → 뒷사람 손 방향
-		FVector Dir = BackHandPos - FrontHandPos;
+		// 패키지 방향: 앞사람 → 뒷사람 방향
+		FVector Dir = BackPos - FrontPos;
 		if (Dir.IsNearlyZero()) return;
 
 		// 핸들 간의 로컬 방향 벡터 (Front -> Back)
 		FVector HBLocal = Handle_Back ? Handle_Back->GetRelativeLocation() : FVector(-100, 0, 0);
-		// HFLocal은 이미 함수 상단에 선언되었으므로 재선언하지 않고 사용하거나, 
-		// 상단의 값과 동일하므로 그대로 유지하면서 지역변수 재선언을 방지합니다.
 		FVector LocalDir = HBLocal - HFLocal;
 		if (LocalDir.IsNearlyZero()) LocalDir = FVector(-1, 0, 0); // 폴백
 
-		// 핵심: 택배의 로컬 Handle방향(LocalDir)이 월드의 손 방향(Dir)과 일치하도록 회전값 계산!
-		FQuat PackageQuat = FQuat::FindBetweenVectors(LocalDir, Dir);
-		FRotator PackageRot = PackageQuat.Rotator();
+		FQuat TargetQuat = FQuat::FindBetweenVectors(LocalDir, Dir);
+		FRotator TargetRot = TargetQuat.Rotator();
 
-		// Handle_Front 월드 위치 = FrontHandPos 가 되도록 패키지 원점 계산
-		FVector RotatedHF = PackageQuat.RotateVector(HFLocal);
-		FVector NewPackageOrigin = FrontHandPos - RotatedHF;
+		// Handle_Front 위치 기준으로 패키지 원점 계산
+		FVector RotatedHF = TargetQuat.RotateVector(HFLocal);
+		FVector TargetOrigin = FrontPos - RotatedHF;
 
-		SetActorLocationAndRotation(NewPackageOrigin, PackageRot, false, nullptr, ETeleportType::None);
+		// 부드러운 위치/회전 보간 적용 (옆으로 이동 시 떨림 현상 완전 방지)
+		if (DeltaTime > 0.0f)
+		{
+			FVector SmoothLoc = FMath::VInterpTo(GetActorLocation(), TargetOrigin, DeltaTime, 30.0f);
+			FRotator SmoothRot = FMath::RInterpTo(GetActorRotation(), TargetRot, DeltaTime, 30.0f);
+			SetActorLocationAndRotation(SmoothLoc, SmoothRot, false, nullptr, ETeleportType::None);
+		}
+		else
+		{
+			SetActorLocationAndRotation(TargetOrigin, TargetRot, false, nullptr, ETeleportType::None);
+		}
 	}
 }
 
@@ -237,8 +308,67 @@ void APackageBase::OnUse_Implementation()
 
 bool APackageBase::CanInteract_Implementation(AActor* Interactor) const
 {
-	// 택배는 F키 상호작용 대상이 아니며, 오직 E키로만 잡고/들고/던집니다.
-	return false;
+	// 이미 최대 인원(2명)이 운반 중인 무거운 택배가 아니면 상호작용/에임 정보 표시 허용
+	if (PackageType == EPackageType::Heavy && CurrentCarriers.Num() >= 2)
+	{
+		return false;
+	}
+	return true;
+}
+
+void APackageBase::SaveItemToData_Implementation(FStoredItemInstanceData& OutData) const
+{
+	Super::SaveItemToData_Implementation(OutData);
+
+	FPackageItemSaveData PackageSaveData;
+	PackageSaveData.BaseValue = BaseValue;
+	PackageSaveData.PackageType = PackageType;
+	PackageSaveData.MaxSpoilTime = MaxSpoilTime;
+	PackageSaveData.CurrentSpoilTime = CurrentSpoilTime;
+	PackageSaveData.bIsBroken = bIsBroken;
+
+	OutData.ExtraSaveData.Add(FInstancedStruct::Make(PackageSaveData));
+
+	if (GetClass()->ImplementsInterface(UQuestItemSaveInterface::StaticClass()))
+	{
+		const FQuestItemSaveData QuestSaveData = IQuestItemSaveInterface::Execute_GetQuestItemSaveData(this);
+		if (QuestSaveData.IsValid())
+		{
+			OutData.ExtraSaveData.Add(FInstancedStruct::Make(QuestSaveData));
+		}
+	}
+}
+
+void APackageBase::LoadItemFromData_Implementation(const FStoredItemInstanceData& InData)
+{
+	Super::LoadItemFromData_Implementation(InData);
+
+	for (const FInstancedStruct& ExtraData : InData.ExtraSaveData)
+	{
+		if (const FPackageItemSaveData* PackageSaveData = ExtraData.GetPtr<FPackageItemSaveData>())
+		{
+			BaseValue = PackageSaveData->BaseValue;
+			PackageType = PackageSaveData->PackageType;
+			MaxSpoilTime = PackageSaveData->MaxSpoilTime;
+			CurrentSpoilTime = PackageSaveData->CurrentSpoilTime;
+			bIsBroken = PackageSaveData->bIsBroken;
+
+			OnRep_bIsBroken();
+			break;
+		}
+	}
+
+	if (GetClass()->ImplementsInterface(UQuestItemSaveInterface::StaticClass()))
+	{
+		for (const FInstancedStruct& ExtraData : InData.ExtraSaveData)
+		{
+			if (const FQuestItemSaveData* QuestSaveData = ExtraData.GetPtr<FQuestItemSaveData>())
+			{
+				IQuestItemSaveInterface::Execute_ApplyQuestItemSaveData(this, *QuestSaveData);
+				return;
+			}
+		}
+	}
 }
 
 void APackageBase::MulticastPickUp_Implementation(AActor* Picker)
@@ -285,27 +415,32 @@ void APackageBase::AddCarrier(AActor* Carrier)
 	{
 		AActor* FrontCarrier = CurrentCarriers[0];
 
-		// [수정] Handle_Back의 월드 위치는 패키지 Pitch(-20도) 기울기의 영향을 받아 하늘/땅으로 오차 발생.
-		// 따라서 현재 기울어진 Handle_Back 위치를 직접 사용하지 않고,
-		// 첫 번째 운반자(FrontCarrier) → 패키지 중심(XY) → 반대편 연장선 상에서 위치를 계산합니다.
-		const FVector PackageCenterXY = FVector(GetActorLocation().X, GetActorLocation().Y, 0.0f);
-		const FVector FrontXY = FVector(FrontCarrier->GetActorLocation().X, FrontCarrier->GetActorLocation().Y, 0.0f);
+		// 박스 핸들 간 물리적 거리 (기본 160cm)
+		float HandleDist = 160.0f;
+		if (Handle_Front && Handle_Back)
+		{
+			HandleDist = FVector::Dist(Handle_Front->GetRelativeLocation(), Handle_Back->GetRelativeLocation());
+		}
+		if (HandleDist < 80.0f || HandleDist > 300.0f)
+		{
+			HandleDist = 160.0f;
+		}
 
-		const FVector FrontToCenter = PackageCenterXY - FrontXY;
-		if (FrontToCenter.IsNearlyZero()) return;
+		// 1인 드래그 시 상자가 놓여 있는 방향(FrontCarrier -> Box) 기준으로 2번째 운반자의 위치를 배치
+		FVector BoxDir = GetActorLocation() - FrontCarrier->GetActorLocation();
+		BoxDir.Z = 0.0f;
+		if (BoxDir.IsNearlyZero())
+		{
+			BoxDir = -FrontCarrier->GetActorForwardVector();
+			BoxDir.Z = 0.0f;
+		}
+		BoxDir.Normalize();
 
-		// 첫 번째 운반자로부터 패키지 중심까지의 거리만큼 반대편으로 연장 + 캐릭터 서있을 여유거리
-		const float HandleDist = FrontToCenter.Size();
-		const FVector OppositeDir = FrontToCenter.GetSafeNormal();
-		constexpr float StandOffDistance = 60.0f;
-
-		// 최종 텔레포트 위치: XY는 반대편 연장선, Z는 첫 번째 운반자와 동일한 높이 유지
-		FVector FinalLocation;
-		FinalLocation.X = PackageCenterXY.X + OppositeDir.X * (HandleDist + StandOffDistance);
-		FinalLocation.Y = PackageCenterXY.Y + OppositeDir.Y * (HandleDist + StandOffDistance);
+		// 2번째 운반자는 FrontCarrier로부터 (HandleDist + 60cm) 거리에 배치되어 FrontCarrier를 마주봄
+		FVector FinalLocation = FrontCarrier->GetActorLocation() + BoxDir * (HandleDist + 60.0f);
 		FinalLocation.Z = FrontCarrier->GetActorLocation().Z;
 
-		// 첫 번째 운반자를 바라보는 방향으로 Yaw 회전
+		// 2번째 운반자가 FrontCarrier를 마주보는 회전
 		FVector DirToFront = FrontCarrier->GetActorLocation() - FinalLocation;
 		DirToFront.Z = 0.0f;
 		const FRotator FaceRotation = DirToFront.IsNearlyZero()
@@ -313,6 +448,13 @@ void APackageBase::AddCarrier(AActor* Carrier)
 			: DirToFront.Rotation();
 
 		Carrier->SetActorLocationAndRotation(FinalLocation, FaceRotation, false, nullptr, ETeleportType::TeleportPhysics);
+		if (APawn* CarrierPawn = Cast<APawn>(Carrier))
+		{
+			if (AController* CarrierController = CarrierPawn->GetController())
+			{
+				CarrierController->SetControlRotation(FaceRotation);
+			}
+		}
 
 		// 첫 번째 운반자도 즉시 2번째 운반자 방향을 바라보게 회전
 		FVector DirToBack = FinalLocation - FrontCarrier->GetActorLocation();
@@ -320,10 +462,26 @@ void APackageBase::AddCarrier(AActor* Carrier)
 		if (!DirToBack.IsNearlyZero())
 		{
 			FrontCarrier->SetActorRotation(DirToBack.Rotation());
+			if (APawn* FrontPawn = Cast<APawn>(FrontCarrier))
+			{
+				if (AController* FrontController = FrontPawn->GetController())
+				{
+					FrontController->SetControlRotation(DirToBack.Rotation());
+				}
+			}
 		}
+
+		TransitionGracePeriod = 1.0f;
 	}
 
 	CurrentCarriers.Add(Carrier);
+
+	if (PackageType == EPackageType::Heavy && CurrentCarriers.Num() == 2)
+	{
+		// 2인 운반 위치로 즉시 스냅 (DeltaTime = 0.0f로 즉시 배치하여 손잡이 이탈 방지)
+		UpdateHeavyPackagePosition(0.0f);
+	}
+
 	UpdateCarriersSpeedModifier();
 }
 
@@ -371,12 +529,16 @@ void APackageBase::RemoveCarrier(AActor* Carrier)
 					+ FVector(0, 0, 80.0f);
 			}
 
-			FRotator DragRot = RemainingCarrier->GetActorRotation();
-			DragRot.Yaw += 180.0f;
-			DragRot.Pitch = -20.0f;
+			FRotator WorldDragRot = RemainingCarrier->GetActorRotation();
+			WorldDragRot.Yaw += 180.0f;
+			WorldDragRot.Pitch = -20.0f;
+			WorldDragRot.Roll = 0.0f;
+
+			FQuat FinalDragQuat = WorldDragRot.Quaternion() * SingleCarryRotationOffset.Quaternion();
+			FRotator DragRot = FinalDragQuat.Rotator();
 
 			const FVector HFLocal = Handle_Front ? Handle_Front->GetRelativeLocation() : FVector::ZeroVector;
-			const FVector NewPackageLoc = DragPos - DragRot.Quaternion().RotateVector(HFLocal);
+			const FVector NewPackageLoc = DragPos - FinalDragQuat.RotateVector(HFLocal);
 
 			SetActorLocationAndRotation(NewPackageLoc, DragRot, false, nullptr, ETeleportType::TeleportPhysics);
 		}
@@ -432,7 +594,7 @@ void APackageBase::OnPackageHit(UPrimitiveComponent* HitComponent, AActor* Other
 	// 충돌 순간의 물리 속도(충격량)를 구함
 	float ImpactSpeed = HitComponent->GetComponentVelocity().Size();
 
-	// 플레이어(MainCharacter)와 부딪혔을 경우 넉다운 처리 검사
+	// 플레이어(MainCharacter)와 부딪혔을 경우 넉다운/피격 처리 검사
 	if (AMainCharacter* HitPlayer = Cast<AMainCharacter>(OtherActor))
 	{
 		// 임팩트 속도가 설정된 넉다운 기준치 이상일 때만 기절(Knockdown) 처리
@@ -441,14 +603,24 @@ void APackageBase::OnPackageHit(UPrimitiveComponent* HitComponent, AActor* Other
 			HitPlayer->Knockdown();
 			UE_LOG(LogTemp, Warning, TEXT("[%s] 플레이어를 세게 타격하여 기절시켰습니다! 속도: %f"), *GetName(), ImpactSpeed);
 		}
+		else if (ImpactSpeed > 150.0f)
+		{
+			HitPlayer->PlayHitReaction(0.5f);
+			UE_LOG(LogTemp, Log, TEXT("[%s] 플레이어 피격 반응 발생! 속도: %f"), *GetName(), ImpactSpeed);
+		}
 		
 		// 플레이어와의 충돌에서는 패키지 자체의 내구도 감소는 진행하지 않음(기획에 따라 변경 가능)
 		return;
 	}
 
-	// 일반 ACharacterBase와의 충돌 무시 (위에서 MainCharacter를 걸러냈으므로 남은 건 NPC 등)
-	if (Cast<ACharacterBase>(OtherActor))
+	// 일반 ACharacterBase와의 충돌 (NPC 등)
+	if (ACharacterBase* HitChar = Cast<ACharacterBase>(OtherActor))
 	{
+		if (ImpactSpeed > 150.0f && HitChar->GetVisualComponent())
+		{
+			static const FGameplayTag HitTag = FGameplayTag::RequestGameplayTag(FName("State.Player.HitReaction"), false);
+			HitChar->GetVisualComponent()->SetTagTemporaryOverride(HitTag, 0.5f);
+		}
 		return;
 	}
 
@@ -478,7 +650,7 @@ void APackageBase::DamagePackage(float DamageAmount)
 	{
 		return;
 	}
-
+	
 	CurrentDurability -= DamageAmount;
 	
 	// 서버 자신(로컬)의 UI도 즉시 갱신되도록 수동으로 OnRep 호출
@@ -540,8 +712,64 @@ void APackageBase::Push_Implementation(AActor* Pusher, FVector PushDirection)
 	// 바닥에 놓여있을 때만 밀기 가능
 	if (CurrentCarriers.Num() == 0)
 	{
-		// 블루프린트나 C++에서 Lerp 또는 RootMotion 기반 이동 로직을 추가
-		// 물리 기반 임펄스 대신 정해진 애니메이션과 거리만큼 이동하게 할 예정
 		UE_LOG(LogTemp, Log, TEXT("택배가 %s 방향으로 밀렸습니다! 저항: %f"), *PushDirection.ToString(), ItemWeight);
+	}
+}
+
+void APackageBase::ApplyTrapDamage_Implementation(float DamageAmount, AActor* Causer)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// 깨지기 쉬운 물품(Fragile)은 함정 대미지 2배
+	float FinalDamage = (PackageType == EPackageType::Fragile) ? (DamageAmount * 2.0f) : DamageAmount;
+	DamagePackage(FinalDamage);
+}
+
+void APackageBase::ApplyTrapStatusEffect_Implementation(TSubclassOf<UGameplayEffect> EffectClass, AActor* Causer)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// 상하기 쉬운 물품(Perishable)이 독/가스/화염에 노출되면 유통기한 급속 감소
+	if (PackageType == EPackageType::Perishable)
+	{
+		CurrentSpoilTime = FMath::Max(0.0f, CurrentSpoilTime - 5.0f);
+	}
+}
+
+void APackageBase::ApplyTrapImpulse_Implementation(FVector ImpulseVector)
+{
+	if (MeshComponent && MeshComponent->IsSimulatingPhysics())
+	{
+		MeshComponent->AddImpulse(ImpulseVector, NAME_None, true);
+	}
+}
+
+void APackageBase::ForceDropCarriedItem_Implementation()
+{
+	if (!HasAuthority() || CurrentCarriers.Num() == 0)
+	{
+		return;
+	}
+
+	MulticastDrop(GetActorLocation());
+}
+
+void APackageBase::DrainBattery_Implementation(float DrainAmount)
+{
+	// 패키지는 배터리 없음
+}
+
+void APackageBase::OnTrapHazardEncountered_Implementation(ETrapHazardType HazardType, AActor* TrapActor)
+{
+	// 위험 물품(Dangerous)이 화염이나 전기를 만나면 폭발 또는 파손
+	if (PackageType == EPackageType::Dangerous && (HazardType == ETrapHazardType::Damage || HazardType == ETrapHazardType::ElectricShock))
+	{
+		DamagePackage(100.0f);
 	}
 }

@@ -54,6 +54,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Warehouse")
 	void ClearStoredItems();
 
+	// 현재 창고 영역 안의 실제 아이템 액터들을 개별 저장 데이터로 변환
+	UFUNCTION(BlueprintCallable, Category = "Warehouse|Persistence")
+	TArray<FStoredItemInstanceData> BuildStoredItemInstanceData() const;
+
 	// 창고 영역에 아이템 들어왓을시 콜백함수
 	UFUNCTION(BlueprintCallable, Category = "Warehouse")
 	bool HandleActorEnteredWarehouse(AActor* OtherActor);

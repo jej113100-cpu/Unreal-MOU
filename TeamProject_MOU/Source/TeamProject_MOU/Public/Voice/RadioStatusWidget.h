@@ -46,6 +46,24 @@
 //   텍스트 하나를 C++ 로 조립한다(우상단은 마이크 상태, 좌하단은 채팅이 쓴다).
 //   WBP 를 만들려면 이름이 같은 TextBlock(StatusText) 을 배치하면 된다.
 //
+// [★ WBP 아이콘을 쓸 때의 구조]
+//
+//   UVoiceStatusWidget 과 완전히 같은 원칙이다. C++ 는 상태를 ERadioIconState
+//   하나로 축약해 넘기고, 그림과 색은 WBP 가 정한다.
+//
+//     Image        RadioIcon  ← 상태별 그림 (IconBrushes / IconTints 로 지정)
+//     ProgressBar  BatteryBar ← 배터리 잔량
+//     TextBlock    StatusText ← 진단용 글자
+//
+//   아이콘 4장이 그대로 대응한다 - 전원 OFF / 전원 ON / 송신 / 수신.
+//   무전기가 없을 때는 아이콘이 없다. 위젯째로 접는다(bHideWhenNoRadio) -
+//   무전기를 안 가진 것은 정상 상태라 화면을 차지할 이유가 없기 때문이다.
+//   마이크와 다른 점이다(마이크 없음은 설정이 잘못됐다는 경고다).
+//
+//   ★ 배터리 바는 보간하지 않는다. 마이크의 음량 바와 달리 배터리는 튀는
+//     값이 아니라서, 보간을 걸면 실제 잔량보다 늦게 따라와 "곧 꺼진다" 를
+//     늦게 알리게 된다.
+//
 // [대응하는 문서]
 //   VOICE_INTEGRATION.md 7-3절(전원/송신), 14절 V6
 
@@ -54,10 +72,14 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "InputCoreTypes.h"
+#include "Styling/SlateBrush.h"
+#include "Voice/VoiceTypes.h"
 #include "RadioStatusWidget.generated.h"
 
 class APawn;
 class ARadio;
+class UImage;
+class UProgressBar;
 class UTextBlock;
 class URadioComponent;
 class UVoiceSubsystem;
@@ -121,7 +143,66 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MOU|Radio")
 	bool bShowRadiusInfo = true;
 
+	// --- WBP 아이콘 설정 ------------------------------------------------------
+
+	/**
+	 * 상태별 무전기 아이콘. WBP 의 클래스 디폴트에서 지정한다.
+	 *
+	 * 아이콘 4장 - 전원 OFF / 전원 ON / 송신 / 수신 - 이 그대로 대응한다.
+	 * None 은 넣지 않는다(아래 bHideWhenNoRadio 로 위젯째 숨긴다).
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "MOU|Radio|UI")
+	TMap<ERadioIconState, FSlateBrush> IconBrushes;
+
+	/** 상태별 아이콘 틴트. 비워두면 기존 텍스트 표시가 쓰던 색이 그대로 쓰인다. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "MOU|Radio|UI")
+	TMap<ERadioIconState, FLinearColor> IconTints;
+
+	/**
+	 * 무전기가 없을 때 위젯을 통째로 숨길지.
+	 *
+	 * ★ 마이크와 다르다. 무전기를 안 가진 것은 **정상 상태**라서 화면을 차지할
+	 *   이유가 없다(마이크 없음은 설정이 잘못됐다는 경고라 항상 떠야 한다).
+	 *
+	 *   테스트 중에는 꺼 두는 것이 낫다 - 숨겨버리면 "무전기를 못 찾은 것" 과
+	 *   "위젯이 아예 안 뜬 것" 을 구분할 수 없다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MOU|Radio|UI")
+	bool bHideWhenNoRadio = true;
+
+	// --- 조회 / 블루프린트 훅 -------------------------------------------------
+
+	/** 지금 아이콘이 나타내는 상태. WBP 애니메이션 분기에 쓴다. */
+	UFUNCTION(BlueprintPure, Category = "MOU|Radio|UI")
+	ERadioIconState GetRadioState() const { return CachedState; }
+
+	/** 배터리가 곧 바닥나는가. 깜빡임 같은 연출은 WBP 에서 이 값으로 건다. */
+	UFUNCTION(BlueprintPure, Category = "MOU|Radio|UI")
+	bool IsBatteryLow() const { return bBatteryLow; }
+
+	/**
+	 * 상태가 **바뀐 순간에만** 불린다.
+	 *
+	 * ★ 매 틱이 아니라 변경 시에만인 것이 중요하다. 매 틱 애니메이션을 다시
+	 *   재생시키면 첫 프레임에서 멈춘 것처럼 보인다.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "MOU|Radio|UI")
+	void OnRadioStateChanged(ERadioIconState NewState, ERadioIconState OldState);
+
 protected:
+	/**
+	 * WBP 에 같은 이름의 Image 가 있으면 자동 연결된다.
+	 *
+	 * ★ StatusText 와 달리 BuildDefaultLayout 이 만들어주지 않는다. UImage 는
+	 *   텍스처가 있어야 의미가 있는데 그 애셋은 에디터에서만 지정할 수 있어서다.
+	 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "MOU|Radio")
+	TObjectPtr<UImage> RadioIcon;
+
+	/** 배터리 잔량 바. 위와 같은 이유로 WBP 에만 있다. */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "MOU|Radio")
+	TObjectPtr<UProgressBar> BatteryBar;
+
 	/** WBP 에 같은 이름의 TextBlock 이 있으면 자동 연결된다. 없으면 BuildDefaultLayout 이 만든다. */
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "MOU|Radio")
 	TObjectPtr<UTextBlock> StatusText;
@@ -129,6 +210,20 @@ protected:
 private:
 	void BuildDefaultLayout();
 	void RefreshStatusText();
+
+	/**
+	 * 무전기의 원본 상태를 아이콘 상태 하나로 축약한다. **UI 를 전혀 모른다.**
+	 *
+	 * ★ 텍스트 표시와 아이콘 표시가 이 함수 하나를 같이 쓴다(UVoiceStatusWidget
+	 *   과 같은 이유). 판정이 두 벌이면 글자와 아이콘이 서로 다른 말을 한다.
+	 */
+	ERadioIconState EvaluateRadioState() const;
+
+	/** 축약된 상태를 브러시/색/가시성으로 옮긴다. */
+	void ApplyRadioState(ERadioIconState NewState);
+
+	/** 배터리 바를 갱신한다. 보간하지 않는다 - 배터리는 튀는 값이 아니다. */
+	void UpdateBatteryBar();
 
 	/**
 	 * 지금 로컬 플레이어가 가지고 있는 무전기의 컴포넌트. 없으면 null.
@@ -168,4 +263,13 @@ private:
 	void HandleTransmitKeyReleased();
 
 	float TimeSinceLastRefresh = 0.f;
+
+	/** 마지막으로 적용한 상태. 바뀔 때만 브러시를 갈아끼우려고 들고 있다. */
+	ERadioIconState CachedState = ERadioIconState::None;
+
+	/** 아직 한 번도 적용한 적이 없다. 첫 갱신은 CachedState 와 같아도 반영해야 한다. */
+	bool bRadioStateApplied = false;
+
+	/** 배터리 경고 구간인가. WBP 가 IsBatteryLow 로 읽어간다. */
+	bool bBatteryLow = false;
 };

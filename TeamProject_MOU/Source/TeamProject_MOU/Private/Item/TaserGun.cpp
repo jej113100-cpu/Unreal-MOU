@@ -29,15 +29,16 @@ void ATaserGun::Fire()
 	FVector ViewLocation = GetActorLocation();
 	FRotator ViewRotation = GetActorRotation();
 
-	APawn* OwnerPawn = Cast<APawn>(LastOwner);
+	// LastOwner 유실(레벨 이동 등) 대비: attach 부모까지 찾아 현재 든 Pawn을 얻는다. [WEAPON-018]
+	APawn* OwnerPawn = GetOwningPawn();
 	if (OwnerPawn && OwnerPawn->GetController())
 	{
 		OwnerPawn->GetController()->GetPlayerViewPoint(ViewLocation, ViewRotation);
 	}
-	else if (LastOwner)
+	else if (OwnerPawn)
 	{
-		// 컨트롤러가 없으면 액터 시점으로 폴백
-		LastOwner->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+		// 컨트롤러가 없으면 폰 시점으로 폴백
+		OwnerPawn->GetActorEyesViewPoint(ViewLocation, ViewRotation);
 	}
 
 	const FVector TraceStart = ViewLocation;
@@ -64,6 +65,12 @@ void ATaserGun::Fire()
 	const FVector FxStart = MuzzlePoint ? MuzzlePoint->GetComponentLocation() : TraceStart;
 	const FVector FxEnd = bHit ? Hit.ImpactPoint : TraceEnd;
 	MulticastPlayFireEffect(FxStart, FxEnd, bHit);
+
+	// 발사 쿨다운 동안 "사용 중" 유지 → FireCooldown 후 슬롯 변경 다시 허용 [WEAPON-017]
+	if (HasAuthority())
+	{
+		GetWorldTimerManager().SetTimer(FireCooldownTimer, this, &ATaserGun::FinishUse, FireCooldown, false);
+	}
 }
 
 // [TASER-006] 무기 공통 히트 처리 override: 맞은 캐릭터에 감전 태그 부여 + 타이머로 해제 예약

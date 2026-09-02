@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Item/ItemSaveData.h"
 #include "ItemSpawner.generated.h"
 
 class AItemBase;
@@ -40,6 +41,13 @@ protected:
 	// BeginPlay에 RowToSpawn을 자동 스폰할지 여부 (레벨 배치형일 때 true)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner")
 	bool bAutoSpawnOnBeginPlay = true;
+
+	// 확률 스폰 슬롯: 배열 크기 = 슬롯 개수, 각 칸에 DT_Item 행 이름 지정.
+	// 스폰 시 이 중 한 칸을 균등 확률(1/N)로 뽑는다. 빈 칸(None)이 뽑히면 아무것도 안 나옴(꽝).
+	// 예) 5칸 중 4칸만 채우면 각 20%씩 아이템 + 20% 꽝.
+	// 비어 있으면 기존 RowToSpawn 단일 스폰 방식을 사용한다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner")
+	TArray<FName> SpawnSlots;
 #pragma endregion
 
 public:
@@ -55,5 +63,9 @@ public:
 	// [SPAWNER-002] 지정한 행의 아이템을 지정 위치/회전에 스폰 (동적 생성용)
 	UFUNCTION(BlueprintCallable, Category = "Spawner")
 	AItemBase* SpawnItemAt(FName RowName, FVector Location, FRotator Rotation);
+
+	// 저장된 아이템 상태를 기반으로 지정 위치/회전에 스폰합니다.
+	UFUNCTION(BlueprintCallable, Category = "Spawner")
+	AItemBase* SpawnItemFromSaveData(const FStoredItemInstanceData& ItemSaveData, FVector Location, FRotator Rotation);
 #pragma endregion
 };

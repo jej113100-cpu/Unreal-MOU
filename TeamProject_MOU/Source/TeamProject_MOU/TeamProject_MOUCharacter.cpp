@@ -60,6 +60,8 @@ void ATeamProject_MOUCharacter::SetupPlayerInputComponent(UInputComponent* Playe
 
 		// Moving
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ATeamProject_MOUCharacter::Move);
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Completed, this, &ATeamProject_MOUCharacter::Move);
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Canceled, this, &ATeamProject_MOUCharacter::Move);
 		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &ATeamProject_MOUCharacter::Look);
 
 		// Looking

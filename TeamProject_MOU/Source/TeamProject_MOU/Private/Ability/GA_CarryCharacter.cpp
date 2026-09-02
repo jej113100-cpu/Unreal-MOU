@@ -44,22 +44,16 @@ void UGA_CarryCharacter::ActivateAbility(const FGameplayAbilitySpecHandle Handle
 		Context.AddSourceObject(Char);
 		ActiveCarryCharacterEffectHandle = ASC->ApplyGameplayEffectToSelf(CarryCharacterEffectClass.GetDefaultObject(), 1.0f, Context);
 	}
-	else if (UBaseAttributeSet* Attr = GetBaseAttributeSet())
+	else if (Char && HasAuthority(&ActivationInfo))
 	{
-		if (HasAuthority(&ActivationInfo) && Char)
-		{
-			float CarrySpeed = Char->GetCalculatedWalkSpeed();
-			Attr->SetMoveSpeed(CarrySpeed);
-			if (Char->GetCharacterMovement())
-			{
-				Char->GetCharacterMovement()->MaxWalkSpeed = CarrySpeed;
-			}
-		}
+		Char->UpdateCharacterSpeed();
 	}
 }
 
 void UGA_CarryCharacter::EndAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, bool bReplicateEndAbility, bool bWasCancelled)
 {
+	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+
 	UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo();
 	ACharacterBase* Char = GetCharacterFromActorInfo();
 
@@ -68,18 +62,9 @@ void UGA_CarryCharacter::EndAbility(const FGameplayAbilitySpecHandle Handle, con
 		ASC->RemoveActiveGameplayEffect(ActiveCarryCharacterEffectHandle);
 		ActiveCarryCharacterEffectHandle.Invalidate();
 	}
-	else if (UBaseAttributeSet* Attr = GetBaseAttributeSet())
-	{
-		if (HasAuthority(&ActivationInfo) && Char)
-		{
-			float BaseSpeed = Char->GetCalculatedWalkSpeed();
-			Attr->SetMoveSpeed(BaseSpeed);
-			if (Char->GetCharacterMovement())
-			{
-				Char->GetCharacterMovement()->MaxWalkSpeed = BaseSpeed;
-			}
-		}
-	}
 
-	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+	if (Char && HasAuthority(&ActivationInfo))
+	{
+		Char->UpdateCharacterSpeed();
+	}
 }

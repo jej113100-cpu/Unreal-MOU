@@ -9,7 +9,9 @@
 class UInputMappingContext;
 class UUserWidget;
 class ULoginWidgetBase;
+class URadioStatusWidget;
 class UVoiceComponent;
+class UVoiceStatusWidget;
 
 /**
  *  Basic PlayerController class for a third person game
@@ -62,7 +64,7 @@ protected:
 	 * PIE/게임 시작 시 채팅 로그인 화면을 자동으로 띄울지.
 	 *
 	 * 이미 로그인되어 있으면(예: 방장이 방을 만들고 리슨서버로 여행해온 경우)
-	 * 다시 묻지 않는다 — ShowLoginWidgetIfNeeded() 가 UChatSubsystem 의 연결 상태로 판단한다.
+	 * 다시 묻지 않는다 — ShowLoginWidgetIfNeeded() 가 UServerSubsystem 의 연결 상태로 판단한다.
 	 */
 	UPROPERTY(EditAnywhere, Category = "MOU|Chat")
 	bool bAutoShowLoginWidget = true;
@@ -86,6 +88,51 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "MOU|Chat")
 	int32 ServerPortOverride = 0;
 
+	// --- 음성/무전 상태 표시 -------------------------------------------------
+	//
+	// ★ 여기서 띄우는 이유는 로그인 위젯과 같다. 위젯 자신은 누가 자기를
+	//   띄우는지 몰라야 하고(그래야 콘솔로도, 레벨 BP 로도 띄울 수 있다),
+	//   "게임이 시작되면 마이크 상태부터 화면에 올린다" 는 **정책**은
+	//   컨트롤러의 책임이다.
+	//
+	//   특히 마이크 표시는 VOICE_INTEGRATION.md 15절의 프라이버시 요구사항이라
+	//   ("마이크가 열려 있는 동안 화면에 항상 표시한다") 콘솔 명령에 맡겨둘 수
+	//   없다 - 아무도 안 치면 요구사항이 지켜지지 않는다.
+
+	/**
+	 * 게임 시작 시 마이크/무전기 상태 위젯을 자동으로 띄울지.
+	 *
+	 * ★ 끄는 것은 **UI 를 직접 조립하는 HUD 를 따로 만들 때**뿐이다. 그 경우
+	 *   그쪽에서 같은 위젯을 반드시 띄워야 한다(마이크 표시는 선택이 아니다).
+	 */
+	UPROPERTY(EditAnywhere, Category = "MOU|Voice")
+	bool bAutoShowVoiceWidgets = true;
+
+	/**
+	 * 띄울 마이크 상태 위젯 클래스. **여기에 WBP 를 넣으면 된다.**
+	 *
+	 * 비워두면 UVoiceStatusWidget 의 C++ 기본 레이아웃(우상단 텍스트)이 뜬다 -
+	 * LoginWidgetClass 와 같은 규칙이라, 아트가 아직 없어도 게임은 돈다.
+	 */
+	UPROPERTY(EditAnywhere, Category = "MOU|Voice", meta = (EditCondition = "bAutoShowVoiceWidgets"))
+	TSubclassOf<UVoiceStatusWidget> VoiceStatusWidgetClass;
+
+	/** 띄울 무전기 상태 위젯 클래스. 비워두면 C++ 기본 레이아웃(우하단 텍스트). */
+	UPROPERTY(EditAnywhere, Category = "MOU|Voice", meta = (EditCondition = "bAutoShowVoiceWidgets"))
+	TSubclassOf<URadioStatusWidget> RadioStatusWidgetClass;
+
+	/**
+	 * 위 둘의 인스턴스. **UPROPERTY 로 들고 있어야 GC 가 안 물어간다.**
+	 *
+	 * AddToViewport 만으로도 뷰포트가 참조를 잡지만, 나중에 RemoveFromParent
+	 * 하는 순간 주인이 사라진다. MobileControlsWidget 과 같은 이유로 들고 있는다.
+	 */
+	UPROPERTY()
+	TObjectPtr<UVoiceStatusWidget> VoiceStatusWidget;
+
+	UPROPERTY()
+	TObjectPtr<URadioStatusWidget> RadioStatusWidget;
+
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
 
@@ -98,5 +145,13 @@ protected:
 private:
 	/** bAutoShowLoginWidget 이 켜져 있고 아직 로그인 전이면 로그인 위젯을 띄운다. */
 	void ShowLoginWidgetIfNeeded();
+
+	/**
+	 * 마이크/무전기 상태 위젯을 띄운다. 이미 떠 있으면 아무것도 안 한다.
+	 *
+	 * ★ 로컬 컨트롤러에서만 뜬다. 서버가 남의 컨트롤러에도 만들면 화면에는
+	 *   안 보이는데 NativeTick 만 도는 위젯이 사람 수만큼 생긴다.
+	 */
+	void ShowVoiceWidgetsIfNeeded();
 
 };

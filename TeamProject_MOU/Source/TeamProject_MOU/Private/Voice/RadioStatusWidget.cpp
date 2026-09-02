@@ -9,10 +9,13 @@
 #include "Voice/VoiceSubsystem.h"
 #include "Voice/VoiceTypes.h"
 
+#include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/Image.h"
 #include "Components/InputComponent.h"
+#include "Components/ProgressBar.h"
 #include "Components/TextBlock.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
@@ -66,6 +69,8 @@ void URadioStatusWidget::NativeConstruct()
 	}
 
 	TimeSinceLastRefresh = RefreshInterval; // 뜨자마자 한 번은 바로 갱신되게
+	ApplyRadioState(EvaluateRadioState());
+	UpdateBatteryBar();
 	RefreshStatusText();
 }
 
@@ -102,6 +107,14 @@ void URadioStatusWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 	if (TimeSinceLastRefresh >= RefreshInterval)
 	{
 		TimeSinceLastRefresh = 0.f;
+
+		ApplyRadioState(EvaluateRadioState());
+
+		// ★ 마이크의 음량 바와 달리 배터리는 매 프레임 갱신할 이유가 없다.
+		//   보간도 안 한다 - 배터리는 초당 몇 퍼센트씩 천천히 줄어드는 값이라
+		//   0.1초 간격으로 넣어도 이미 부드럽다.
+		UpdateBatteryBar();
+
 		RefreshStatusText();
 	}
 }
@@ -188,7 +201,11 @@ void URadioStatusWidget::HandlePowerKeyPressed()
 	if (ARadio* Item = Cast<ARadio>(Comp->GetOwner()))
 	{
 		Item->TogglePower();
-		RefreshStatusText(); // 다음 주기까지 기다리지 않고 즉시 반영
+
+		// 다음 주기까지 기다리지 않고 즉시 반영. 키를 눌렀는데 최대 0.1초 동안
+		// 화면이 그대로면 "안 눌렸나" 하고 한 번 더 누르게 된다.
+		ApplyRadioState(EvaluateRadioState());
+		RefreshStatusText();
 		return;
 	}
 
@@ -203,6 +220,7 @@ void URadioStatusWidget::HandlePowerKeyPressed()
 		}
 	}
 
+	ApplyRadioState(EvaluateRadioState());
 	RefreshStatusText();
 }
 
@@ -231,6 +249,7 @@ void URadioStatusWidget::HandleTransmitKeyPressed()
 		return; // 무전기가 아예 없다
 	}
 
+	ApplyRadioState(EvaluateRadioState());
 	RefreshStatusText();
 }
 
@@ -243,6 +262,7 @@ void URadioStatusWidget::HandleTransmitKeyReleased()
 		Voice->SetRadioTransmitting(false);
 	}
 
+	ApplyRadioState(EvaluateRadioState());
 	RefreshStatusText();
 }
 
@@ -278,6 +298,155 @@ namespace
 	{
 		return FString::Printf(TEXT("%.0fm"), Centimeters / 100.f);
 	}
+
+	/**
+	 * 상태별 기본 틴트. WBP 의 IconTints 가 비어 있을 때 쓴다.
+	 *
+	 * ★ 값은 기존 텍스트 표시가 쓰던 색 그대로다. 이미 화면에서 검증된 색이라
+	 *   새로 정할 이유가 없고, 글자와 아이콘 색이 어긋나지도 않는다.
+	 */
+	FLinearColor GetDefaultRadioTint(ERadioIconState State)
+	{
+		switch (State)
+		{
+		case ERadioIconState::Off:          return FLinearColor(0.55f, 0.55f, 0.55f);
+		case ERadioIconState::Transmitting: return FLinearColor(1.f,   0.55f, 0.2f);
+		case ERadioIconState::Receiving:    return FLinearColor(0.4f,  0.8f,  1.f);
+		case ERadioIconState::On:           return FLinearColor(0.3f,  1.f,   0.3f);
+		case ERadioIconState::None:
+		default:                            return FLinearColor(0.5f,  0.5f,  0.5f);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 상태 판정
+//
+// ★ 여기서 UI 를 만지지 않는다. 판정과 표현을 갈라놓아야 글자 표시와 아이콘
+//   표시가 **같은 상태 머신**을 쓴다(UVoiceStatusWidget 과 같은 이유).
+// ---------------------------------------------------------------------------
+
+ERadioIconState URadioStatusWidget::EvaluateRadioState() const
+{
+	const URadioComponent* Comp = FindLocalRadioComponent();
+
+	if (Comp == nullptr)
+	{
+		return ERadioIconState::None;
+	}
+
+	if (!Comp->IsPoweredOn())
+	{
+		// ★ 꺼져 있으면 송신도 수신도 없다. 전원을 먼저 보는 이유다 -
+		//   꺼진 무전기에 "수신 중" 이 뜨면 그 자체로 거짓말이다.
+		return ERadioIconState::Off;
+	}
+
+	const UVoiceSubsystem* Voice = GetVoiceSubsystem();
+
+	if (Voice == nullptr)
+	{
+		return ERadioIconState::On;
+	}
+
+	// ★ 송신이 수신을 이긴다(VoiceTypes.h 의 ERadioIconState 주석).
+	//   둘 다 성립할 때 놓치면 안 되는 쪽은 송신이다 - 이 게임에서 송신은
+	//   곧 내 위치가 새는 것이라, 켜진 줄 모르는 편이 훨씬 위험하다.
+	//
+	//   여기서 IsInHand 를 보지 않는 것은 의도적이다. 인벤토리에 넣은 채로
+	//   X 를 눌러도 서버가 조용히 거부하는데, 그때 아이콘이 "송신 중" 으로
+	//   보여야 **왜 안 나가는지** 를 글자 줄에서 찾아보게 된다.
+	if (Voice->IsRadioTransmitting())
+	{
+		return ERadioIconState::Transmitting;
+	}
+
+	if (Voice->IsReceivingRadio())
+	{
+		return ERadioIconState::Receiving;
+	}
+
+	return ERadioIconState::On;
+}
+
+// ---------------------------------------------------------------------------
+// 상태 -> 아이콘
+// ---------------------------------------------------------------------------
+
+void URadioStatusWidget::ApplyRadioState(ERadioIconState NewState)
+{
+	// ★ 안 바뀌었으면 아무것도 안 한다. 매 주기 다시 넣으면 OnRadioStateChanged
+	//   가 계속 불려서 WBP 애니메이션이 첫 프레임에서 되감긴다.
+	if (bRadioStateApplied && NewState == CachedState)
+	{
+		return;
+	}
+
+	const ERadioIconState OldState = CachedState;
+
+	CachedState        = NewState;
+	bRadioStateApplied = true;
+
+	// ★ 무전기가 없으면 위젯째로 접는다. 마이크와 다르다 - 무전기를 안 가진
+	//   것은 정상 상태라 화면을 차지할 이유가 없다.
+	//   bHideWhenNoRadio 를 끄면 "무전기 없음" 글자가 그대로 보인다(테스트용).
+	if (bHideWhenNoRadio)
+	{
+		SetVisibility(NewState == ERadioIconState::None
+			? ESlateVisibility::Collapsed
+			: ESlateVisibility::HitTestInvisible);
+	}
+
+	if (RadioIcon != nullptr)
+	{
+		// 비워둔 상태는 브러시를 안 건드린다 - WBP 에서 찍어둔 그림이 남는다.
+		if (const FSlateBrush* Brush = IconBrushes.Find(NewState))
+		{
+			RadioIcon->SetBrush(*Brush);
+		}
+
+		const FLinearColor* Tint = IconTints.Find(NewState);
+		RadioIcon->SetColorAndOpacity(Tint ? *Tint : GetDefaultRadioTint(NewState));
+	}
+
+	OnRadioStateChanged(NewState, OldState);
+}
+
+// ---------------------------------------------------------------------------
+// 배터리 바
+// ---------------------------------------------------------------------------
+
+void URadioStatusWidget::UpdateBatteryBar()
+{
+	// ★ 배터리는 ARadio 에만 있다. CurrentDurability 가 AItemBase 의 것이라
+	//   테스트 무전기(AVoiceDebugRadio)에는 아예 없다(RefreshStatusText 와 같은 근거).
+	const ARadio* Item = FindLocalRadioItem();
+
+	bBatteryLow = (Item != nullptr) && (Item->GetBatteryPercent() <= GBatteryLowThreshold);
+
+	if (BatteryBar == nullptr)
+	{
+		return; // WBP 를 안 쓰면 글자 게이지(MakeBatteryGauge)가 대신한다.
+	}
+
+	if (Item == nullptr)
+	{
+		// 테스트 무전기는 배터리 개념 자체가 없다. 0% 로 그리면 "방전됨" 으로
+		// 잘못 읽히므로 바를 아예 접는다.
+		BatteryBar->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+
+	// 보간하지 않는다. 배터리는 초당 몇 퍼센트씩 천천히 줄어드는 값이라
+	// 0.1초 간격으로 그대로 넣어도 이미 부드럽다 - 보간을 걸면 오히려 실제
+	// 잔량보다 늦게 따라와서 "곧 꺼진다" 를 늦게 알리게 된다.
+	BatteryBar->SetVisibility(ESlateVisibility::HitTestInvisible);
+	BatteryBar->SetPercent(Item->GetBatteryPercent());
+
+	// 색만 여기서 바꾼다. 깜빡임 같은 연출은 WBP 가 IsBatteryLow 로 건다.
+	BatteryBar->SetFillColorAndOpacity(bBatteryLow
+		? FLinearColor(0.95f, 0.3f, 0.3f)
+		: FLinearColor(0.3f, 1.f, 0.3f));
 }
 
 void URadioStatusWidget::RefreshStatusText()
@@ -289,11 +458,17 @@ void URadioStatusWidget::RefreshStatusText()
 
 	URadioComponent* Comp = FindLocalRadioComponent();
 
+	// ★ 상태 판정을 여기서 다시 하지 않는다. EvaluateRadioState 하나가 아이콘과
+	//   글자 양쪽의 근거다 - 판정이 두 벌이면 상태를 하나 추가할 때 한쪽만
+	//   고치게 되고, 그러면 아이콘과 글자가 서로 다른 말을 한다.
+	const ERadioIconState State = EvaluateRadioState();
+
 	// --- 무전기가 없다 ------------------------------------------------------
 	//
 	// 이 경우를 명시적으로 알려주지 않으면 "Z 를 눌러도 아무 일도 안 일어난다" 로
 	// 헤매게 된다. 어떻게 하나 만드는지까지 같이 알려준다.
-	if (Comp == nullptr)
+	// (bHideWhenNoRadio 가 켜져 있으면 위젯째로 접혀서 이 글자도 안 보인다)
+	if (State == ERadioIconState::None || Comp == nullptr)
 	{
 		StatusText->SetText(FText::FromString(
 			TEXT("[무전기 없음]\nMOU.Voice.Radio.Spawn 으로 테스트용을 손에 들 수 있다")));
@@ -302,11 +477,11 @@ void URadioStatusWidget::RefreshStatusText()
 	}
 
 	const ARadio* Item = Cast<ARadio>(Comp->GetOwner());
-	const UVoiceSubsystem* Voice = GetVoiceSubsystem();
 
-	const bool bPowered      = Comp->IsPoweredOn();
+	const bool bPowered      = (State != ERadioIconState::Off);
 	const bool bInHand       = Comp->IsInHand();
-	const bool bTransmitting = Voice && Voice->IsRadioTransmitting();
+	const bool bTransmitting = (State == ERadioIconState::Transmitting);
+	const bool bReceiving    = (State == ERadioIconState::Receiving);
 
 	// --- 1줄: 전원 + 소지 상태 ----------------------------------------------
 	//
@@ -325,14 +500,20 @@ void URadioStatusWidget::RefreshStatusText()
 	//   흔들려서 오히려 읽기 어렵다(UVoiceStatusWidget 과 같은 이유).
 	FString BatteryLine;
 
-	if (Item != nullptr)
+	if (Item == nullptr)
 	{
-		const float Percent = Item->GetBatteryPercent();
-		BatteryLine = FString::Printf(TEXT("\n배터리 [%s] %3.0f%%"), *MakeBatteryGauge(Percent), Percent * 100.f);
+		BatteryLine = TEXT("\n배터리 (테스트 무전기 - 없음)");
+	}
+	else if (BatteryBar != nullptr)
+	{
+		// ★ WBP 의 BatteryBar 가 붙어 있으면 글자 막대는 빼고 숫자만 남긴다.
+		//   같은 정보를 두 벌 그리면 화면만 시끄럽다.
+		BatteryLine = FString::Printf(TEXT("\n배터리 %3.0f%%"), Item->GetBatteryPercent() * 100.f);
 	}
 	else
 	{
-		BatteryLine = TEXT("\n배터리 (테스트 무전기 - 없음)");
+		const float Percent = Item->GetBatteryPercent();
+		BatteryLine = FString::Printf(TEXT("\n배터리 [%s] %3.0f%%"), *MakeBatteryGauge(Percent), Percent * 100.f);
 	}
 
 	// --- 3줄: 반경 ----------------------------------------------------------
@@ -350,32 +531,45 @@ void URadioStatusWidget::RefreshStatusText()
 	// ★ 송신이 안 되는 이유를 여기서 말해준다. 서버가 조용히 거부하기 때문에
 	//   (FindUsableRadioFor) 이 줄이 없으면 X 를 눌러도 왜 아무 일이 없는지
 	//   알 방법이 없다.
+	// ★ 분기 순서를 EvaluateRadioState 와 똑같이 맞춘다. 글자와 아이콘이
+	//   다른 우선순위를 쓰면 "아이콘은 송신인데 글자는 수신" 같은 것이 나온다.
 	FString ActionLine;
-	FLinearColor Color;
 
-	if (!bPowered)
-	{
-		ActionLine = FString::Printf(TEXT("\n%s 로 켜기"), *PowerToggleKey.ToString());
-		Color = FLinearColor(0.55f, 0.55f, 0.55f);
-	}
-	else if (bTransmitting)
+	// 색도 아이콘과 같은 표에서 가져온다.
+	FLinearColor Color = GetDefaultRadioTint(State);
+
+	if (bTransmitting)
 	{
 		// 지금 실제로 무전이 나가고 있다. 가장 강한 신호를 준다 - 이 게임에서
 		// 송신은 곧 위치가 새는 것이라, 켜진 줄 모르고 있으면 안 된다.
 		ActionLine = FString::Printf(TEXT("\n[송신 중] %s"), *TransmitKey.ToString());
-		Color = FLinearColor(1.f, 0.55f, 0.2f);
 	}
-	else if (!bInHand)
+	else if (bReceiving)
 	{
-		// 규칙표의 "인벤토리 = 송신 불가" 칸. 수신은 되고 배터리도 닳는다는 것을
-		// 같이 알려야 "꺼둘까" 가 선택이 된다.
-		ActionLine = TEXT("\n수신만 (송신하려면 손에 들 것) · 배터리는 닳는 중");
-		Color = FLinearColor(1.f, 0.85f, 0.3f);
+		ActionLine = TEXT("\n[수신 중] 무전이 들어오고 있다");
 	}
-	else
+	else if (!bPowered)
+	{
+		ActionLine = FString::Printf(TEXT("\n%s 로 켜기"), *PowerToggleKey.ToString());
+	}
+	else if (bInHand)
 	{
 		ActionLine = FString::Printf(TEXT("\n%s 홀드로 송신"), *TransmitKey.ToString());
-		Color = FLinearColor(0.3f, 1.f, 0.3f);
+	}
+
+	// ★ 인벤토리 경고는 위 분기를 **덮어쓰지 않고 덧붙인다.**
+	//   수신 중에도 이 사실은 그대로라서다 - 규칙표의 "인벤토리 = 송신 불가" 칸을
+	//   수신이 가려버리면, 무전이 들어오는 동안 X 를 눌러도 왜 안 나가는지
+	//   화면 어디에도 안 남는다. 배터리가 닳는다는 것도 같이 알려야
+	//   "꺼둘까" 가 선택이 된다.
+	if (bPowered && !bInHand && !bTransmitting)
+	{
+		ActionLine += TEXT("\n수신만 (송신하려면 손에 들 것) · 배터리는 닳는 중");
+
+		if (!bReceiving)
+		{
+			Color = FLinearColor(1.f, 0.85f, 0.3f);
+		}
 	}
 
 	// 배터리가 얼마 없으면 위 판정을 덮어쓴다. 곧 꺼진다는 것이 다른 무엇보다
@@ -444,8 +638,28 @@ namespace
 	URadioStatusWidget* FindDebugRadioStatusWidget(UWorld* World)
 	{
 		PruneDebugRadioStatusWidgets();
-		const TWeakObjectPtr<URadioStatusWidget>* Found = GDebugRadioStatusWidgets.Find(World);
-		return Found ? Found->Get() : nullptr;
+
+		if (const TWeakObjectPtr<URadioStatusWidget>* Found = GDebugRadioStatusWidgets.Find(World))
+		{
+			if (URadioStatusWidget* Widget = Found->Get())
+			{
+				return Widget;
+			}
+		}
+
+		// ★ 이 맵만 보면 **콘솔이 만든 것밖에 못 찾는다.**
+		//   지금은 ATeamProject_MOUPlayerController::BeginPlay 가 시작할 때
+		//   이미 하나 띄우므로, 그것을 못 보면 ShowUI 를 칠 때마다 위젯이 하나씩
+		//   더 쌓여 화면에 글자가 겹쳐 보인다. 뷰포트에 있는 것까지 훑는다.
+		if (World == nullptr)
+		{
+			return nullptr;
+		}
+
+		TArray<UUserWidget*> InViewport;
+		UWidgetBlueprintLibrary::GetAllWidgetsOfClass(World, InViewport, URadioStatusWidget::StaticClass(), /*TopLevelOnly=*/false);
+
+		return InViewport.Num() > 0 ? Cast<URadioStatusWidget>(InViewport[0]) : nullptr;
 	}
 
 	/**

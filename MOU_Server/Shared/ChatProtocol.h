@@ -23,7 +23,11 @@ namespace MOU
 	//            좁아지고, 참여자가 실제로 떠나는 시점은 RoomHostReady 가 정한다.
 	//            v5 까지는 참여자가 고정 3초를 세고 떠났다. 호스트의 맵 로딩이 그보다
 	//            오래 걸리면 튕겼고, 빨리 끝나도 3초를 그냥 버렸다.
-	constexpr uint16_t kProtocolVersion = 6;
+	//   6 -> 7 : 친구 + 메신저(1:1 DM) + 접속 상태(Presence) 추가.
+	//            ★ EChatChannel::Dead 와 SetDead 가 **폐기**됐다. 죽은 사람 채팅은
+	//              이 서버가 아니라 방장의 리슨서버가 처리한다 —
+	//              CHAT_DESIGN.md 3절. 번호는 호환을 위해 남겨두되 쓰지 않는다.
+	constexpr uint16_t kProtocolVersion = 7;
 
 	// BodySize 가 이 값을 넘으면 악성 패킷으로 보고 연결을 끊는다.
 	constexpr uint32_t kMaxBodySize = 4096;
@@ -37,6 +41,32 @@ namespace MOU
 	// 계정 정책. 서버가 검사하고, 클라이언트는 미리 걸러서 왕복을 아낀다.
 	constexpr uint32_t kMinLoginIdLen  = 3;
 	constexpr uint32_t kMinPasswordLen = 6;
+
+	// --- 친구 / 메신저 (v7) ---
+
+	// ★ 이 숫자는 임의로 정한 것이 아니다. FriendListAck 가 한 패킷에 담겨야 한다:
+	//
+	//     sizeof(FriendListAckBody) + sizeof(FriendEntry) * kMaxFriends <= kMaxBodySize
+	//                             2 +                  44 * 93          =  4094  <= 4096
+	//
+	//   94 로 올리는 순간 4096 을 넘어 **친구가 많은 계정만 목록이 안 오는**
+	//   증상이 난다. 파일 끝의 static_assert 가 컴파일 타임에 잡아주므로,
+	//   FriendEntry 에 필드를 추가하면 이 값을 같이 줄여야 한다.
+	constexpr uint32_t kMaxFriends = 93;
+
+	// 친구 검색어. **닉네임만이 아니라 사용자가 친 문자열 그대로**가 들어온다.
+	//
+	// ★ 지금은 닉네임 완전 일치로만 찾지만, 나중에 "닉네임#태그" 를 붙일 때
+	//   프로토콜을 안 바꾸려고 처음부터 태그까지 담을 폭을 잡아둔다.
+	//   파싱은 서버가 하므로 그때 바뀌는 곳은 서버 함수 하나뿐이다.
+	//   40바이트 아끼자고 나중에 v8 을 찍는 것이 훨씬 비싸다.
+	constexpr uint32_t kMaxFriendQueryLen = kMaxNameLen + 8;   // 닉(32) + '#' + 태그 + 여유
+
+	// 대화창을 열거나 위로 스크롤할 때 한 번에 받는 메시지 수.
+	//
+	//   sizeof(DmHistoryAckBody) + (sizeof(DmEntry) + 본문) * kDmPageSize <= kMaxBodySize
+	//   본문이 길면 서버가 이 개수보다 적게 보낼 수 있다 — 받는 쪽은 Count 를 믿는다.
+	constexpr uint32_t kDmPageSize = 50;
 
 	// --- 로비 ---
 	constexpr uint32_t kMaxRoomTitleLen  = 48;
@@ -87,6 +117,78 @@ namespace MOU
 		// 서버는 여기서도 중계만 한다 — 게임 상태를 들여다보지 않는다.
 		RoomHostReadyReq = 25,  // 호스트 -> 서버. 리슨서버가 열려서 접속을 받는 중이다
 		RoomHostReady    = 26,  // 서버 -> 참여자. 지금 떠나라 (호스트 주소 동봉)
+
+		// --- 친구 (v7) ---
+		// ★ 새 옵코드는 **항상 끝에 붙인다.** 중간에 끼워 넣으면 뒤 번호가 전부
+		//   밀려서, 업데이트를 안 한 클라와 조용히 어긋난다(패킷은 도착하는데
+		//   엉뚱한 핸들러가 받는다). 쓰지 않게 된 번호도 지우지 않는 이유가 같다.
+		FriendListReq         = 27,  // C->S. 내 친구 + 대기 중인 신청 전부
+		FriendListAck         = 28,  // S->C. 뒤에 FriendEntry N개
+		FriendAddReq          = 29,  // C->S. 닉네임(나중엔 닉#태그)으로 신청
+		FriendAddAck          = 30,  // S->C. 신청 결과
+		FriendRequestIncoming = 31,  // S->C. 누가 나에게 신청했다 (실시간)
+		FriendRespondReq      = 32,  // C->S. 수락 / 거절
+		FriendRemoveReq       = 33,  // C->S. 친구 삭제 또는 보낸 신청 취소
+		FriendUpdate          = 34,  // S->C. 친구 하나의 상태 변화 (목록 전체 대신 델타)
+		FriendPresence        = 35,  // S->C. 친구 하나의 접속 상태만 바뀜
+
+		// --- 메신저 1:1 DM (v7) ---
+		DirectMessageSend = 36,  // C->S. DM 보내기
+		DirectMessage     = 37,  // S->C. DM 도착 (실시간 또는 로그인 시 밀린 것)
+		DmHistoryReq      = 38,  // C->S. 대화 기록 (창 열기 / 위로 스크롤)
+		DmHistoryAck      = 39,  // S->C. 뒤에 DmEntry N개
+	};
+
+	/**
+	 * 친구 관계의 상태.
+	 *
+	 * ★ 대칭이 아니다. Pending 은 방향이 있고 화면도 다르다 —
+	 *   보낸 쪽은 "대기 중" 회색, 받은 쪽은 수락/거절 버튼이 뜬다.
+	 *   그래서 한 값으로 뭉뚱그리지 않고 둘로 나눈다.
+	 */
+	enum class EFriendState : uint8_t
+	{
+		Friend          = 0,   // 서로 수락함
+		PendingOutgoing = 1,   // 내가 보냈고 상대가 아직 응답 안 함
+		PendingIncoming = 2,   // 상대가 보냈고 내가 수락/거절해야 함
+	};
+
+	/**
+	 * 접속 상태. **서버가 판정한다** — 클라가 주장하지 않는다.
+	 *
+	 * 근거는 전부 서버가 이미 갖고 있다: 세션 유무(SessionManager)와
+	 * 방 상태(Rooms). 새로 추적할 것이 없어 추가 비용이 사실상 없다.
+	 *
+	 * ★ "대기중"(방에 앉아 있음)을 따로 두지 않았다. 친구 입장에서 온라인과
+	 *   대기중은 둘 다 "지금 말 걸어도 된다" 라서 행동이 달라지지 않는다.
+	 *   행동을 바꾸는 경계는 게임 중인가 아닌가 하나뿐이라 거기서만 나눈다.
+	 */
+	enum class EPresence : uint8_t
+	{
+		Offline = 0,   // 인증된 세션이 없다
+		Online  = 1,   // 세션이 있고, 방에 없거나 방이 Waiting
+		InGame  = 2,   // 방에 있고 그 방이 ERoomState::InGame
+	};
+
+	/** 친구 관련 요청의 결과. */
+	enum class EFriendResult : uint8_t
+	{
+		Success        = 0,
+		NotAuthed      = 1,   // 로그인하지 않았다
+		NotFound       = 2,   // 그런 닉네임이 없다
+
+		// ★ 같은 닉네임이 여럿이다. accounts.nickname 은 UNIQUE 가 아니다.
+		//   이 오류가 곧 "#태그" 가 필요해지는 지점이다 — 지금 nickname 에
+		//   UNIQUE 를 걸어 막아버리면 태그를 붙일 때 되돌려야 한다.
+		//   자세한 배경은 CHAT_DESIGN.md 4-2절.
+		AmbiguousName  = 3,
+
+		AlreadyFriend  = 4,
+		AlreadyPending = 5,
+		SelfRequest    = 6,   // 자기 자신에게 신청
+		LimitReached   = 7,   // kMaxFriends 초과
+		InvalidFormat  = 8,   // 빈 문자열 등. 지금은 '#' 이 들어와도 여기
+		DbError        = 9,
 	};
 
 	/** 방 관련 요청의 결과. */
@@ -382,6 +484,164 @@ namespace MOU
 		uint16_t HostPort;
 	};
 
+	// ------------------------------------------------------------------
+	// 친구 (v7)
+	// ------------------------------------------------------------------
+
+	/**
+	 * 친구 목록의 한 줄. FriendListAckBody 뒤에 Count 개가 이어붙는다.
+	 *
+	 * ★ 닉네임을 여기 실어 보내는 이유: 클라가 UserId 만 받으면 이름을 알려고
+	 *   또 왕복해야 한다. 닉네임은 바뀔 수 있지만 목록을 받는 시점의 값이면
+	 *   충분하고, 바뀌면 FriendUpdate 가 새 이름으로 덮는다.
+	 */
+	struct FriendEntry
+	{
+		uint64_t UserId;
+		char     Nickname[kMaxNameLen];
+		uint8_t  State;         // EFriendState
+		uint8_t  Presence;      // EPresence. State != Friend 면 항상 Offline 로 채운다
+		uint16_t UnreadCount;   // 안 읽은 DM 개수. 목록의 배지에 쓴다
+	};
+
+	// 뒤에 Count 개의 FriendEntry 가 이어붙는다.
+	// 로그인 직후 한 번만 받고, 그 뒤로는 FriendUpdate / FriendPresence 델타만 온다.
+	struct FriendListAckBody
+	{
+		uint16_t Count;
+	};
+
+	struct FriendAddReqBody
+	{
+		// ★ 파싱하지 않고 **사용자가 친 문자열 그대로** 보낸다.
+		//   '#' 이 없으면 서버가 닉네임 완전 일치로 찾고, 나중에 태그가
+		//   들어오면 서버만 고치면 된다(kMaxFriendQueryLen 주석).
+		char Query[kMaxFriendQueryLen];
+	};
+
+	struct FriendAddAckBody
+	{
+		uint64_t TargetUserId;   // 성공했을 때만 채워진다. 실패면 0
+		uint8_t  bSuccess;
+		uint8_t  Result;         // EFriendResult
+	};
+
+	/** 누가 나에게 신청했다. 받는 즉시 목록에 PendingIncoming 으로 추가한다. */
+	struct FriendRequestIncomingBody
+	{
+		uint64_t FromUserId;
+		char     FromNickname[kMaxNameLen];
+	};
+
+	struct FriendRespondReqBody
+	{
+		uint64_t FromUserId;
+		uint8_t  bAccept;        // 0 = 거절
+	};
+
+	/** 친구 삭제. 아직 수락 안 된 신청을 취소할 때도 같은 것을 쓴다. */
+	struct FriendRemoveReqBody
+	{
+		uint64_t TargetUserId;
+	};
+
+	/**
+	 * 친구 하나가 바뀌었다(추가 / 삭제 / 수락됨).
+	 *
+	 * 목록 전체를 다시 내려주지 않는 이유: 친구가 93명이면 4KB 를 통째로
+	 * 다시 보내야 하는데, 실제로 바뀐 것은 한 줄이다.
+	 */
+	struct FriendUpdateBody
+	{
+		uint64_t UserId;
+		char     Nickname[kMaxNameLen];
+		uint8_t  State;          // EFriendState
+		uint8_t  Presence;       // EPresence
+		uint8_t  bRemoved;       // 1 이면 목록에서 지운다 (State 는 무시)
+	};
+
+	/**
+	 * 접속 상태만 바뀌었다.
+	 *
+	 * ★ FriendUpdate 와 나눈 이유: 이쪽이 훨씬 자주 온다(로그인/로그아웃/
+	 *   게임 시작마다, 친구 수만큼). 닉네임 32바이트를 매번 실어 보낼 이유가
+	 *   없어서 9바이트로 유지한다.
+	 *
+	 * ★ 폴링하지 않는다. 상태가 실제로 바뀌는 순간에만 서버가 밀어준다 —
+	 *   아무 일도 없는 동안 트래픽이 흐르지 않는다(CHAT_DESIGN.md 5-2절).
+	 */
+	struct FriendPresenceBody
+	{
+		uint64_t UserId;
+		uint8_t  Presence;       // EPresence
+	};
+
+	// ------------------------------------------------------------------
+	// 메신저 1:1 DM (v7)
+	// ------------------------------------------------------------------
+
+	// 뒤에 TextLen 바이트의 UTF-8 본문이 이어진다.
+	struct DirectMessageSendBody
+	{
+		uint64_t TargetUserId;
+		uint16_t TextLen;
+	};
+
+	/**
+	 * DM 한 통. 뒤에 TextLen 바이트의 UTF-8 본문이 이어진다.
+	 *
+	 * ★ 보낸 사람도 자기 메시지를 이 형태로 되받는다. 클라가 자기 화면에
+	 *   먼저 그려놓는 방식이면 서버가 매긴 MessageId 와 Timestamp 를 모르고,
+	 *   그러면 커서 페이징의 기준이 클라마다 달라진다.
+	 *
+	 * ★ 상대가 오프라인이면 이 패킷은 지금 안 나간다. 대신 DB 에 남아 있다가
+	 *   상대가 로그인할 때 밀린 것으로 나간다 — **저장이 전송보다 먼저다**
+	 *   (순서를 바꾸면 "보냈는데 기록이 없는" 메시지가 생긴다).
+	 */
+	struct DirectMessageBody
+	{
+		uint64_t MessageId;      // 서버가 매긴다. 커서 페이징의 기준
+		uint64_t FromUserId;
+		uint64_t ToUserId;
+		int64_t  Timestamp;      // Unix epoch (초)
+		uint16_t TextLen;
+	};
+
+	struct DmHistoryReqBody
+	{
+		uint64_t PeerUserId;
+
+		// 0 이면 가장 최근부터. 그 외에는 "이 번호보다 오래된 것" 을 달라는 뜻이다.
+		//
+		// ★ LIMIT/OFFSET 이 아니라 커서인 이유: 위로 스크롤하는 도중에 새
+		//   메시지가 도착하면 오프셋이 밀려서 **같은 줄을 두 번 받거나 한 줄을
+		//   건너뛴다.** id 기준이면 새 메시지가 와도 경계가 움직이지 않는다.
+		uint64_t BeforeMessageId;
+	};
+
+	// 뒤에 Count 개의 DmEntry 가 이어붙는다. **오래된 것 -> 최신 순.**
+	struct DmHistoryAckBody
+	{
+		uint64_t PeerUserId;
+		uint16_t Count;
+		uint8_t  bHasMore;       // 더 위로 스크롤할 것이 남았는가
+	};
+
+	/**
+	 * 기록 한 줄. 뒤에 TextLen 바이트의 본문이 이어진다.
+	 *
+	 * ★ 본문 길이가 제각각이라 **배열 인덱싱으로 읽을 수 없다.** 앞에서부터
+	 *   순회하면서 TextLen 만큼 건너뛰어야 한다. RoomInfo 처럼 고정 크기가
+	 *   아니라는 점을 읽는 쪽이 반드시 지켜야 한다.
+	 */
+	struct DmEntry
+	{
+		uint64_t MessageId;
+		uint64_t FromUserId;
+		int64_t  Timestamp;
+		uint16_t TextLen;
+	};
+
 #pragma pack(pop)
 
 	// 패딩이 끼면 서버와 클라이언트의 해석이 어긋난다.
@@ -413,4 +673,39 @@ namespace MOU
 	              "방 목록이 kMaxBodySize 를 넘는다");
 	static_assert(sizeof(RoomMemberListBody) + sizeof(RoomMemberInfo) * kMaxPlayersInRoom <= kMaxBodySize,
 	              "대기실 멤버 목록이 kMaxBodySize 를 넘는다");
+
+	// --- 친구 / 메신저 (v7) ---
+	static_assert(sizeof(FriendEntry)               == 44, "FriendEntry 에 패딩이 끼었다");
+	static_assert(sizeof(FriendListAckBody)         ==  2, "FriendListAckBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendAddReqBody)          == 40, "FriendAddReqBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendAddAckBody)          == 10, "FriendAddAckBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendRequestIncomingBody) == 40, "FriendRequestIncomingBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendRespondReqBody)      ==  9, "FriendRespondReqBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendRemoveReqBody)       ==  8, "FriendRemoveReqBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendUpdateBody)          == 43, "FriendUpdateBody 에 패딩이 끼었다");
+	static_assert(sizeof(FriendPresenceBody)        ==  9, "FriendPresenceBody 에 패딩이 끼었다");
+	static_assert(sizeof(DirectMessageSendBody)     == 10, "DirectMessageSendBody 에 패딩이 끼었다");
+	static_assert(sizeof(DirectMessageBody)         == 34, "DirectMessageBody 에 패딩이 끼었다");
+	static_assert(sizeof(DmHistoryReqBody)          == 16, "DmHistoryReqBody 에 패딩이 끼었다");
+	static_assert(sizeof(DmHistoryAckBody)          == 11, "DmHistoryAckBody 에 패딩이 끼었다");
+	static_assert(sizeof(DmEntry)                   == 26, "DmEntry 에 패딩이 끼었다");
+
+	// ★★ 친구 목록이 한 패킷에 담기는지. **이것이 kMaxFriends 를 정한 근거다.**
+	//
+	//   2 + 44 * 93 = 4094 <= 4096.  94 로 올리면 여기서 빌드가 깨진다.
+	//   FriendEntry 에 필드를 추가할 때도 마찬가지다 — 그때는 kMaxFriends 를
+	//   줄이거나, 목록을 여러 패킷으로 쪼개는 설계를 해야 한다.
+	//   (kMaxBodySize 를 올리는 것은 모든 패킷의 상한을 같이 올려 악성 패킷
+	//    방어가 약해지므로 마지막 수단이다.)
+	static_assert(sizeof(FriendListAckBody) + sizeof(FriendEntry) * kMaxFriends <= kMaxBodySize,
+	              "친구 목록이 kMaxBodySize 를 넘는다. kMaxFriends 를 줄일 것");
+
+	// 본문이 0바이트여도 한 페이지가 안 담기면 kDmPageSize 자체가 틀린 것이다.
+	// (본문이 길면 서버가 Count 를 줄여 보낸다 — 받는 쪽은 Count 를 믿는다.)
+	static_assert(sizeof(DmHistoryAckBody) + sizeof(DmEntry) * kDmPageSize <= kMaxBodySize,
+	              "DM 한 페이지가 kMaxBodySize 를 넘는다. kDmPageSize 를 줄일 것");
+
+	// 검색어가 닉네임보다 짧으면 정상적인 닉네임조차 못 담는다.
+	static_assert(kMaxFriendQueryLen > kMaxNameLen,
+	              "친구 검색어 폭이 닉네임보다 좁다");
 }

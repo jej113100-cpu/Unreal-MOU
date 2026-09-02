@@ -2,6 +2,7 @@
 #include "Player/MainCharacter.h"
 #include "Components/CarryingComponent.h"
 #include "Components/StatusComponent.h"
+#include "AbilitySystemComponent.h"
 #include "Base/PackageBase.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
@@ -104,5 +105,52 @@ void UMainAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsPushing = MainCharacter->bIsPushingMode;
 		bIsStunned = false;
 		bIsHeld = false;
+	}
+
+	// 7. AO(에임 오프셋) 차단 상태 검사 (이모트, 넘어짐/기절, 죽음, 그로기, 잡힘)
+	bool bIsEmoting = false;
+	if (UAbilitySystemComponent* ASC = MainCharacter->GetAbilitySystemComponent())
+	{
+		static const FGameplayTag EmoteTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Emote"), false);
+		bIsEmoting = EmoteTag.IsValid() && ASC->HasMatchingGameplayTag(EmoteTag);
+	}
+
+	bool bShouldBlockAO = (MainCharacter->bIsDead || MainCharacter->bIsGroggy || MainCharacter->IsStunned() || bIsStunned || bIsHeld || bIsEmoting);
+
+	if (bShouldBlockAO)
+	{
+		// 차단 시 즉시 완전 비활성화 (보간 없음: 한 프레임도 AO가 남으면 애니메이션이 깨짐)
+		AO_Alpha = 0.0f;
+		AimPitch = 0.0f;
+		AimYaw = 0.0f;
+	}
+	else
+	{
+		AO_Alpha = FMath::FInterpTo(AO_Alpha, 1.0f, DeltaSeconds, 10.0f);
+
+		bool bIsSimulatedProxy = !MainCharacter->IsLocallyControlled();
+
+		if (bIsSimulatedProxy)
+		{
+			// 시뮬레이트 프록시(다른 플레이어 화면에 보이는 캐릭터):
+			// GetBaseAimRotation()의 Yaw는 프록시에서 항상 ActorRotation과 동일하므로
+			// 서버에서 복제된 ReplicatedAimYaw를 직접 사용
+			AimYaw = FMath::Clamp(MainCharacter->ReplicatedAimYaw, -70.0f, 70.0f);
+
+			// Pitch는 RemoteViewPitch(언리얼 내장 복제값)에서 계산
+			FRotator AimRot = MainCharacter->GetBaseAimRotation();
+			FRotator ActorRot = MainCharacter->GetActorRotation();
+			AimPitch = FMath::Clamp((AimRot - ActorRot).GetNormalized().Pitch, -70.0f, 70.0f);
+		}
+		else
+		{
+			// 로컬 플레이어: 직접 컨트롤러 에임 각도 계산
+			FRotator AimRot = MainCharacter->GetBaseAimRotation();
+			FRotator ActorRot = MainCharacter->GetActorRotation();
+			FRotator DeltaRot = (AimRot - ActorRot).GetNormalized();
+
+			AimPitch = FMath::Clamp(DeltaRot.Pitch, -70.0f, 70.0f);
+			AimYaw = FMath::Clamp(DeltaRot.Yaw, -70.0f, 70.0f);
+		}
 	}
 }

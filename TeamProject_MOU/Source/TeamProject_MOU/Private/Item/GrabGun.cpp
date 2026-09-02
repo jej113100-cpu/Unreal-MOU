@@ -629,6 +629,8 @@ void AGrabGun::BreakApartLinkage()
 	bGrabArmed = false;
 	bPulling = false;
 	SetJawColliderActive(false);
+	SetOwnerInputLocked(false); // 분해 시에도 사용자 잠금 해제
+	FinishUse();                // 사용 중 상태 해제 (슬롯 변경 허용)
 
 	// 모든 StaticMesh 컴포넌트 중 루트(body_shell=MeshComponent)와 트리거만 남기고
 	// 나머지 빨간 부품을 떨어뜨린다.
@@ -720,6 +722,9 @@ void AGrabGun::ReleaseTarget()
 
 	// 사용자 이동+카메라 잠금 해제 (시퀀스 종료)
 	SetOwnerInputLocked(false);
+
+	// 사용 중 상태 해제 → 슬롯 변경 다시 허용 [WEAPON-017]
+	FinishUse();
 
 	// 내구도 0으로 이번 당기기가 마지막이었으면, 당김 완료 후 지금 분해한다.
 	if (bBreakAfterPull)

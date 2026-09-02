@@ -93,11 +93,18 @@ public:
 	 * (`bAllowSpatialization`)는 사운드를 만드는 시점에 읽히기 때문에,
 	 * Start() 뒤에 켜면 그 사운드는 끝까지 2D 로 난다.
 	 *
-	 * 그 뒤로는 매 프레임 불러도 싸다 - 모드가 실제로 바뀔 때만 일한다.
-	 * 재생 중 모드가 바뀌면 사운드를 다시 만들지 않고 **감쇠만 갈아끼운다.**
-	 * 다시 만들면 말하는 도중에 소리가 끊겼다 이어져 딸깍거린다.
+	 * 그 뒤로는 매 프레임 불러도 싸다 - 모드나 배율이 **눈에 띄게** 바뀔 때만
+	 * 실제로 일한다(아래 RadiusScale 참고). 재생 중 바뀌면 사운드를 다시
+	 * 만들지 않고 **감쇠만 갈아끼운다.** 다시 만들면 말하는 도중에 소리가
+	 * 끊겼다 이어져 딸깍거린다.
+	 *
+	 * @param RadiusScale  ★ 이 발화의 음량이 만드는 반경 배율(0~1, 보통
+	 *   MinRadiusScale~1.0). 모드가 정하는 감쇠 반경에 곱해진다 - 아날로그로
+	 *   음량이 원 크기를 정하는 지점이 바로 여기다(VoiceTypes.h 의
+	 *   GetRadiusScaleFromNormalized). **RMS 원본이 아니라 이미 정규화·
+	 *   스무딩된 값을 넘겨야 한다** - 여기서 또 스무딩하지 않는다.
 	 */
-	void SetProximityMode(EVoiceMode Mode);
+	void SetProximityMode(EVoiceMode Mode, float RadiusScale = 1.f);
 
 	/** 지금 3D 로 설정돼 있는지. 루프백(2D)과 구분하는 데 쓴다. */
 	bool IsSpatialized() const { return bSpatialConfigured; }
@@ -166,6 +173,17 @@ private:
 	 * 감쇠 갱신은 오디오 스레드로 명령을 보내는 일이라 공짜가 아니다.
 	 */
 	EVoiceMode CurrentMode = EVoiceMode::Normal;
+
+	/**
+	 * 지금 적용돼 있는 반경 배율. SetProximityMode 의 조기 반환 캐시다.
+	 *
+	 * ★ 이 값은 매 프레임 조금씩 바뀐다(음량이 연속으로 변하므로) - 모드처럼
+	 *   "같으면 반환" 이 아니라 **RadiusScaleUpdateEpsilon 이상 벌어졌을 때만**
+	 *   AdjustAttenuation 을 부른다. 그렇게 하지 않으면 재생 중인 모든 스트림이
+	 *   매 프레임 오디오 스레드에 명령을 보내게 된다 - 동시 발화자가 늘면
+	 *   그대로 부하가 된다(SetProximityMode 헤더 주석의 "공짜가 아니다").
+	 */
+	float CurrentRadiusScale = 1.f;
 
 	/** SetProximityMode 가 한 번이라도 불렸는지. 2D(루프백)와 구분한다. */
 	bool bSpatialConfigured = false;

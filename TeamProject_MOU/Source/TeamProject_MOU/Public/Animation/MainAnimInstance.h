@@ -23,6 +23,9 @@ public:
 	virtual void NativeInitializeAnimation() override;
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Animation|Aim")
+	float GetAOAlpha() const { return AO_Alpha; }
+
 protected:
 	// ---------------------------------------------------------
 	// [캐릭터 및 무브먼트 참조]
@@ -80,4 +83,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|State")
 	bool bIsSecondCarrier = false;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Aim")
+	float AimPitch = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Aim")
+	float AimYaw = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Aim")
+	float AO_Alpha = 1.0f;
 };

@@ -222,5 +222,36 @@ EAccountResult Authenticate(const std::string& LoginId, const std::string& Passw
 	return EAccountResult::Success;
 }
 
+bool GetNickname(uint64_t UserId, std::string& OutNickname)
+{
+	std::lock_guard<std::mutex> Lock(GMutex);
+	if (GDb == nullptr)
+	{
+		return false;
+	}
+
+	sqlite3_stmt* St = nullptr;
+	const char* Sql = "SELECT nickname FROM accounts WHERE id = ?;";
+
+	if (sqlite3_prepare_v2(GDb, Sql, -1, &St, nullptr) != SQLITE_OK)
+	{
+		std::printf("[계정] 닉네임 조회 준비 실패: %s\n", sqlite3_errmsg(GDb));
+		return false;
+	}
+
+	sqlite3_bind_int64(St, 1, static_cast<sqlite3_int64>(UserId));
+
+	bool bFound = false;
+	if (sqlite3_step(St) == SQLITE_ROW)
+	{
+		const char* NickText = reinterpret_cast<const char*>(sqlite3_column_text(St, 0));
+		OutNickname = NickText ? NickText : "";
+		bFound = true;
+	}
+
+	sqlite3_finalize(St);
+	return bFound;
+}
+
 } // namespace Accounts
 } // namespace MOU

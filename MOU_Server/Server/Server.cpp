@@ -3,10 +3,13 @@
 // 리슨서버와 별개의 프로세스로 상시 가동된다.
 // 호스트가 게임을 종료해도 이 프로세스는 살아있으므로 채팅 로그가 유지된다.
 //
-// 사용법: Server <port> [db경로]
+// 사용법: Server <port> [db경로] [--upnp] [--public-ip <주소>]
 
 #include "Accounts.h"
 #include "ChatLog.h"
+#include "DirectMessages.h"
+#include "Friends.h"
+#include "NatPortMapping.h"
 #include "Rooms.h"
 #include "Session.h"
 #include "Framing.h"
@@ -29,6 +32,68 @@ namespace
 	SessionManager GSessions;
 	std::atomic<bool> GRunning{ true };
 
+	// 이 서버가 외부에 노출된 주소. --public-ip 인자나 UPnP 결과로 채워진다.
+	// 비어 있으면 치환을 하지 않는다(예전과 똑같이 동작한다).
+	std::string GPublicIp;
+
+	/**
+	 * 사설/루프백 대역인가.
+	 *
+	 * [왜 필요한가]
+	 *   방의 호스트 주소는 accept() 에서 읽은 상대 IP 를 쓴다. 호스트가 서버와
+	 *   **다른** 공유기 뒤에 있으면 그 값이 곧 호스트의 공인 IP 라 정확하다.
+	 *
+	 *   그런데 호스트가 서버와 **같은** 공유기 안에 있으면(특히 서버 PC 본인이
+	 *   방장일 때) 그 값이 사설 IP 가 된다. 게다가 호스트가 공인 IP 로 접속해
+	 *   헤어핀을 타면 공유기가 출발지를 자기 주소로 바꿔서 게이트웨이 IP
+	 *   (예: 192.168.35.1) 가 찍힌다. 그 주소를 받은 외부 참가자는 자기 네트워크의
+	 *   엉뚱한 기기로 가거나 아무 데도 못 가서 무한 로딩에 걸린다.
+	 *
+	 *   그래서 "사설이면 서버 자신의 공인 IP 로 바꾼다" 는 판정이 필요하다.
+	 */
+	bool IsPrivateAddress(const std::string& Address)
+	{
+		unsigned A = 0, B = 0, C = 0, D = 0;
+		if (std::sscanf(Address.c_str(), "%u.%u.%u.%u", &A, &B, &C, &D) != 4)
+		{
+			return false;   // 파싱 실패. 함부로 바꾸지 않는다
+		}
+
+		if (A == 10)  return true;                        // 10.0.0.0/8
+		if (A == 127) return true;                        // 루프백
+		if (A == 172 && B >= 16 && B <= 31) return true;  // 172.16.0.0/12
+		if (A == 192 && B == 168) return true;            // 192.168.0.0/16
+		if (A == 169 && B == 254) return true;            // 링크로컬
+		if (A == 100 && B >= 64 && B <= 127) return true; // CGNAT 100.64.0.0/10
+		return false;
+	}
+
+	/**
+	 * 방에 기록할 호스트 주소를 정한다.
+	 *
+	 * 클라이언트가 보내온 값은 절대 쓰지 않는다 — 남의 주소를 적어 엉뚱한 곳으로
+	 * 접속을 몰아주는 장난을 막기 위해서다. 서버가 아는 두 값 중에서만 고른다:
+	 *   1) accept() 에서 읽은 상대 IP (공인이면 그대로 쓴다)
+	 *   2) 서버 자신의 공인 IP (상대가 사설이면 = 같은 공유기 안에 있다는 뜻)
+	 *
+	 * [한계] 호스트와 참가자가 **둘 다** 서버와 같은 공유기 안에 있으면, 참가자는
+	 *   공인 IP 로 나갔다 돌아오는 헤어핀 접속을 하게 된다. 공유기가 헤어핀을
+	 *   지원하지 않으면 그 조합만 실패한다. 전원이 LAN 안에 있는 상황이라면
+	 *   애초에 --public-ip 를 주지 않는 편이 낫다.
+	 */
+	std::string ResolveHostAddress(const std::string& PeerAddress)
+	{
+		if (GPublicIp.empty() || !IsPrivateAddress(PeerAddress))
+		{
+			return PeerAddress;
+		}
+
+		std::printf("[방 주소] 호스트가 서버와 같은 네트워크에 있다(%s). "
+		            "외부 참가자를 위해 %s 로 바꿔 기록한다.\n",
+		            PeerAddress.c_str(), GPublicIp.c_str());
+		return GPublicIp;
+	}
+
 	// Ctrl+C 로 서버를 내릴 때 큐에 남은 채팅 로그를 마저 쓰고 나간다.
 	// 이게 없으면 accept() 에서 블록된 채 프로세스가 즉사해서
 	// 아직 커밋 안 된 로그가 통째로 사라진다.
@@ -38,8 +103,19 @@ namespace
 	void OnInterrupt(int)
 	{
 		GRunning = false;
+
+		// ★ 공유기에 열어둔 포트를 먼저 지운다. 영구 매핑이라 여기서 안 지우면
+		//   프로세스가 사라져도 공유기에는 그대로 남는다.
+		//   네트워크 왕복이라 몇 백 ms 걸릴 수 있는데, 그 대기가 곧 "확실히 지웠다" 는 보장이다.
+		//   Start 를 안 했거나 실패했으면 아무 일도 하지 않는다.
+		Nat::Stop();
+
 		ChatLog::Stop();
 		Accounts::Stop();
+		// v7. 둘 다 동기 커밋이라 큐에 남은 것이 없지만, 커넥션을 닫아야
+		// WAL 이 정리된다. Start 가 실패했어도 부르는 것이 안전하다.
+		Friends::Stop();
+		DirectMessages::Stop();
 		std::_Exit(0);   // 소켓과 메모리 회수는 OS 에 맡긴다
 	}
 
@@ -164,6 +240,15 @@ namespace
 
 	// 로그인 거부를 사유와 함께 알린다.
 	// 그냥 연결을 끊어버리면 클라이언트는 원인을 모른 채 3초마다 재접속만 반복한다.
+	// ★ 전방 선언. 정의는 아래 "친구" 절에 있다.
+	//
+	//   로그인 핸들러가 이 파일에서 가장 먼저 나오는데(계정 -> 로비 -> 친구 순),
+	//   접속 알림은 친구 기능이라 정의가 뒤에 온다. 정의를 위로 끌어올리면
+	//   그것이 의존하는 SendToUsers/FindAuthedSession 까지 줄줄이 따라 올라와
+	//   파일의 주제별 순서가 무너진다. 선언 한 줄이 싸다.
+	void BroadcastPresence(const SessionPtr& Subject, EPresence NewPresence);
+	void DeliverPendingDirectMessages(const SessionPtr& Session);
+
 	void SendLoginFailure(const SessionPtr& Session, ELoginResult Reason)
 	{
 		LoginAckBody Ack{};
@@ -231,6 +316,23 @@ namespace
 		Session->TeamId  = Req.TeamId;
 		Session->bAuthed = true;
 
+		// ★ 친구 캐시를 여기서 한 번 채운다(Session.h 의 FriendIds 주석).
+		//   이 목록은 "접속 상태가 바뀌었을 때 알려줄 대상" 이라, 상태가 바뀔
+		//   때마다 DB 를 때리지 않으려고 캐시한다. 실패해도 로그인은 시킨다 —
+		//   친구 목록이 비어 보이는 것과 로그인이 안 되는 것은 심각도가 다르다.
+		{
+			std::vector<uint64_t> FriendIds;
+			if (Friends::GetFriendIds(Session->UserId, FriendIds))
+			{
+				Session->SetFriendIds(std::move(FriendIds));
+			}
+			else
+			{
+				std::printf("[경고] %s 의 친구 목록을 읽지 못했다. 접속 알림이 안 갈 수 있다.\n",
+				            Session->Name.c_str());
+			}
+		}
+
 		LoginAckBody Ack{};
 		Ack.UserId        = Session->UserId;
 		Ack.TeamId        = Session->TeamId;
@@ -243,7 +345,19 @@ namespace
 		            Session->Name.c_str(),
 		            static_cast<unsigned long long>(Session->UserId), Session->TeamId);
 
-		return SendPacket(Session->Sock, EOpcode::LoginAck, &Ack, sizeof(Ack));
+		// ★ LoginAck 를 먼저 보내고 알린다. 순서를 바꾸면 친구 쪽에서
+		//   "온라인" 을 받았는데 정작 본인은 아직 로그인 절차 중인 창이 생긴다.
+		const bool bAckSent = SendPacket(Session->Sock, EOpcode::LoginAck, &Ack, sizeof(Ack));
+
+		// 내가 접속했음을 친구들에게 알린다 (M4).
+		BroadcastPresence(Session, EPresence::Online);
+
+		// 오프라인 동안 온 DM 을 내려준다 (M5).
+		// 친구 목록(FriendListReq)보다 먼저 갈 수 있는데 문제되지 않는다 —
+		// 클라는 DM 을 UserId 로 묶어 두었다가 목록이 오면 붙이면 된다.
+		DeliverPendingDirectMessages(Session);
+
+		return bAckSent;
 	}
 
 	// 계정 생성. 로그인과 달리 세션 상태를 바꾸지 않는다.
@@ -338,6 +452,189 @@ namespace
 		});
 	}
 
+	// ------------------------------------------------------------------
+	// 친구 (v7)
+	//
+	// [락 순서] Friends:: 는 DB 락만, GSessions.ForEach 는 세션 락만 잡는다.
+	//   **두 락을 겹쳐 잡지 않는다** — DB 조회를 먼저 끝내고 그 결과로 전송한다.
+	//   로비 쪽(Rooms)이 지키는 규칙과 같다.
+	// ------------------------------------------------------------------
+
+	/**
+	 * 이 사람의 지금 접속 상태를 판정한다. **서버만 안다 — 클라 주장은 안 받는다.**
+	 *
+	 * 근거가 두 곳(세션, 방)에 나뉘어 있어서 여기서 합친다.
+	 *   세션 없음            -> Offline
+	 *   세션 있고 방이 InGame -> InGame
+	 *   그 외                -> Online
+	 */
+	EPresence ComputePresence(uint64_t UserId)
+	{
+		bool bOnline = false;
+
+		GSessions.ForEach([&](const SessionPtr& S)
+		{
+			if (S->bAuthed && S->UserId == UserId)
+			{
+				bOnline = true;
+			}
+		});
+
+		if (!bOnline)
+		{
+			return EPresence::Offline;
+		}
+
+		// ★ "대기중"(방에 앉아 있음)은 따로 두지 않는다. 친구 입장에서 온라인과
+		//   대기중은 둘 다 "지금 말 걸어도 된다" 라서 행동이 안 바뀐다.
+		ERoomState State = ERoomState::Waiting;
+		if (Rooms::GetRoomStateOf(UserId, State) && State == ERoomState::InGame)
+		{
+			return EPresence::InGame;
+		}
+
+		return EPresence::Online;
+	}
+
+	/** 접속해 있으면 그 세션. 없으면 nullptr. */
+	SessionPtr FindAuthedSession(uint64_t UserId)
+	{
+		SessionPtr Found;
+
+		GSessions.ForEach([&](const SessionPtr& S)
+		{
+			if (S->bAuthed && S->UserId == UserId)
+			{
+				Found = S;
+			}
+		});
+
+		return Found;
+	}
+
+	/**
+	 * 닉네임을 구한다. 접속 중이면 세션에서, 아니면 DB 에서.
+	 *
+	 * ★★ 세션에서만 찾으면 안 된다. 친구 알림은 **접속한 쪽에게, 접속하지 않은
+	 *   쪽에 대해** 보내는 경우가 있다 — 오프라인이던 사람의 신청을 수락하는
+	 *   순간이 정확히 그렇다. 그때 빈 이름이 나가면 상대 친구 목록에
+	 *   **이름 없는 줄**이 생기고, 다시 로그인할 때까지 그대로 남는다.
+	 *   (통합 테스트에서 실제로 잡힌 버그다.)
+	 */
+	std::string ResolveNickname(uint64_t UserId)
+	{
+		if (const SessionPtr S = FindAuthedSession(UserId))
+		{
+			return S->Name;
+		}
+
+		std::string Nick;
+		Accounts::GetNickname(UserId, Nick);
+		return Nick;
+	}
+
+	/**
+	 * 친구 하나의 변화를 한 사람에게 알린다(목록 전체 대신 델타).
+	 *
+	 * @param Recipient  받을 사람. 오프라인이면 아무 일도 안 한다 —
+	 *                   다음 로그인 때 FriendListAck 로 최신 상태를 받는다.
+	 * @param AboutId    변화가 생긴 친구
+	 */
+	void SendFriendUpdate(uint64_t Recipient, uint64_t AboutId, const std::string& AboutNick,
+	                      EFriendState State, bool bRemoved)
+	{
+		const SessionPtr Target = FindAuthedSession(Recipient);
+		if (!Target)
+		{
+			return;
+		}
+
+		FriendUpdateBody Body{};
+		Body.UserId   = AboutId;
+		Body.State    = static_cast<uint8_t>(State);
+		Body.bRemoved = bRemoved ? 1 : 0;
+		// 지워진 상대의 상태는 의미가 없다. 굳이 세션을 뒤지지 않는다.
+		Body.Presence = bRemoved ? static_cast<uint8_t>(EPresence::Offline)
+		                         : static_cast<uint8_t>(ComputePresence(AboutId));
+		CopyFixedString(Body.Nickname, kMaxNameLen, AboutNick);
+
+		SendPacket(Target->Sock, EOpcode::FriendUpdate, &Body, sizeof(Body));
+	}
+
+	/**
+	 * 내 접속 상태가 바뀐 것을 **접속해 있는 내 친구들에게만** 알린다 (v7 M4).
+	 *
+	 * ★★ 폴링하지 않는 이유: 친구 93명 x 접속자 N명이 몇 초마다 전체 목록을
+	 *   요청하면, 아무 일도 안 일어나는 동안에도 트래픽이 계속 흐른다.
+	 *   상태 변화는 드문 사건이라 **바뀔 때만 밀어주는 쪽이 압도적으로 싸다.**
+	 *
+	 * ★ 대상은 세션에 캐시된 FriendIds 다. 여기서 DB 를 조회하면 로그인/로그아웃
+	 *   마다 친구 테이블을 때리게 되어 접속자가 늘수록 느려진다(Session.h).
+	 *
+	 * ★ 오프라인 친구에게는 보내지 않는다 — 받을 사람이 없다. 그 친구가 나중에
+	 *   로그인하면 FriendListAck 로 최신 상태를 한 번에 받는다.
+	 *
+	 * @param Subject  상태가 바뀐 사람의 세션. 이 사람의 친구 목록을 쓴다.
+	 */
+	void BroadcastPresence(const SessionPtr& Subject, EPresence NewPresence)
+	{
+		if (!Subject || !Subject->bAuthed)
+		{
+			return;
+		}
+
+		// 복사본을 받는다 — 아래에서 세션을 순회하는 동안 남이 목록을 고칠 수
+		// 있고, 그러면 반복자가 깨진다(Session.h 의 CopyFriendIds 주석).
+		const std::vector<uint64_t> FriendIds = Subject->CopyFriendIds();
+
+		if (FriendIds.empty())
+		{
+			return;
+		}
+
+		FriendPresenceBody Body{};
+		Body.UserId   = Subject->UserId;
+		Body.Presence = static_cast<uint8_t>(NewPresence);
+
+		SendToUsers(FriendIds, EOpcode::FriendPresence, &Body, sizeof(Body), nullptr, 0);
+	}
+
+	/**
+	 * 여러 사람의 상태 변화를 한꺼번에 알린다. 게임 시작/종료처럼 방 인원이
+	 * 통째로 같은 상태가 될 때 쓴다.
+	 *
+	 * ★ UserId 목록을 받는 이유: 방을 떠난 뒤에는 Rooms 가 더 이상 그 사람을
+	 *   모르므로, 떠나기 **전에** 뽑아둔 목록으로 알려야 한다.
+	 */
+	void BroadcastPresenceFor(const std::vector<uint64_t>& UserIds, EPresence NewPresence)
+	{
+		for (const uint64_t Id : UserIds)
+		{
+			if (const SessionPtr S = FindAuthedSession(Id))
+			{
+				BroadcastPresence(S, NewPresence);
+			}
+		}
+	}
+
+	/**
+	 * 접속해 있는 두 사람의 친구 캐시를 갱신한다.
+	 *
+	 * ★ 오프라인인 쪽은 건드릴 것이 없다 — 다음 로그인 때 DB 에서 새로 읽는다.
+	 *   그래서 캐시와 DB 가 어긋날 수 있는 구간이 없다.
+	 */
+	void SyncFriendCaches(uint64_t A, uint64_t B, bool bNowFriends)
+	{
+		if (const SessionPtr SA = FindAuthedSession(A))
+		{
+			bNowFriends ? SA->AddFriendId(B) : SA->RemoveFriendId(B);
+		}
+		if (const SessionPtr SB = FindAuthedSession(B))
+		{
+			bNowFriends ? SB->AddFriendId(A) : SB->RemoveFriendId(A);
+		}
+	}
+
 	/**
 	 * 방의 현재 명단을 멤버 전원에게 보낸다.
 	 * 누가 들어오고 나가고 준비를 누를 때마다 부른다 — 대기실 UI 는 이것만 보고 그린다.
@@ -400,6 +697,11 @@ namespace
 			            static_cast<unsigned long long>(Session->UserId),
 			            Recipients.size(), Rooms::Count());
 			NotifyRoomClosed(Recipients, RoomId, ERoomCloseReason::HostLeft);
+
+			// ★ 방이 사라졌으니 남아 있던 사람들은 다시 "온라인" 이다 (M4).
+			//   게임이 시작된 방이었다면 이들은 "게임중" 으로 보이고 있었고,
+			//   여기서 되돌리지 않으면 **친구 목록에 영영 게임중으로 남는다.**
+			BroadcastPresenceFor(Recipients, EPresence::Online);
 		}
 		else
 		{
@@ -408,6 +710,12 @@ namespace
 			            static_cast<unsigned long long>(Session->UserId));
 			BroadcastRoomMembers(RoomId);
 		}
+
+		// ★ 나간 사람 본인의 상태는 **여기서 알리지 않는다.** 호출자가 정한다:
+		//     · 스스로 나감  -> HandleRoomLeaveReq 가 Online 을 알린다
+		//     · 접속 종료    -> ClientThread 가 Offline 을 알린다
+		//   여기서 Online 을 보내면 접속 종료 경로에서 Online -> Offline 두 개가
+		//   연달아 나가 친구 화면이 깜빡인다.
 	}
 
 	bool HandleRoomCreateReq(const SessionPtr& Session, const char* Body, uint32_t BodySize)
@@ -437,9 +745,13 @@ namespace
 		// 비밀번호는 널 종료가 없는 고정 4바이트다. 길이를 지정해 그대로 읽는다.
 		const std::string Password(Req.Password, kRoomPasswordLen);
 
+		// PeerAddress 를 그대로 쓰지 않고 한 번 거른다. 호스트가 서버와 같은
+		// 공유기 안이면 사설 IP 라서, 외부 참가자가 그 주소로는 못 온다.
+		const std::string HostAddress = ResolveHostAddress(Session->PeerAddress);
+
 		uint32_t NewRoomId = 0;
 		const ERoomResult R = Rooms::Create(
-			Session->UserId, Session->Name, Session->PeerAddress, Req.HostPort,
+			Session->UserId, Session->Name, HostAddress, Req.HostPort,
 			Title, Req.bHasPassword != 0, Password, Req.MaxPlayers, NewRoomId);
 
 		if (R == ERoomResult::Success)
@@ -447,7 +759,7 @@ namespace
 			std::printf("[방 생성] #%u \"%s\" 방장=%s(%llu) 주소=%s:%u %s\n",
 			            NewRoomId, Title.c_str(), Session->Name.c_str(),
 			            static_cast<unsigned long long>(Session->UserId),
-			            Session->PeerAddress.c_str(), Req.HostPort,
+			            HostAddress.c_str(), Req.HostPort,
 			            Req.bHasPassword ? "[비번]" : "");
 		}
 		else
@@ -574,6 +886,10 @@ namespace
 		{
 			// v4 까지는 방장 전용이었다. 이제 참여자도 이걸로 대기실에서 나간다.
 			LeaveRoomAndNotify(Session);
+
+			// 스스로 나갔으므로 다시 "온라인" 이다 (M4).
+			// 게임중이던 방에서 나온 경우 이게 없으면 계속 게임중으로 보인다.
+			BroadcastPresence(Session, EPresence::Online);
 		}
 		return true;
 	}
@@ -633,6 +949,10 @@ namespace
 		CopyFixedString(Start.HostAddress, kMaxAddressLen, HostAddress);
 
 		SendToUsers(Recipients, EOpcode::RoomStart, &Start, sizeof(Start), nullptr, 0);
+
+		// ★ 방이 InGame 이 됐으므로 이 방 사람들의 친구에게 "게임중" 을 알린다 (M4).
+		//   Recipients 는 방 멤버 전원이다 - 방장도 포함된다.
+		BroadcastPresenceFor(Recipients, EPresence::InGame);
 		return true;
 	}
 
@@ -730,6 +1050,456 @@ namespace
 		return true;
 	}
 
+	// ------------------------------------------------------------------
+	// 친구 요청 처리 (v7)
+	// ------------------------------------------------------------------
+
+	/**
+	 * 친구 + 대기 중인 신청을 전부 내려준다. 로그인 직후 클라가 한 번 부른다.
+	 *
+	 * ★ 그 뒤로는 이걸 다시 부르지 않는다. 변화는 FriendUpdate / FriendPresence
+	 *   델타로만 간다 — 93명 목록 4KB 를 상태가 바뀔 때마다 다시 보낼 이유가 없다.
+	 */
+	bool HandleFriendListReq(const SessionPtr& Session, const char*, uint32_t)
+	{
+		if (!Session->bAuthed)
+		{
+			return true;   // 로그인 전에는 조용히 무시한다
+		}
+
+		std::vector<FriendRow> Rows;
+		if (!Friends::GetList(Session->UserId, Rows))
+		{
+			FriendListAckBody Empty{};
+			return SendPacket(Session->Sock, EOpcode::FriendListAck, &Empty, sizeof(Empty));
+		}
+
+		// 안 읽은 개수는 DM 쪽이 안다. 친구마다 COUNT 를 돌리면 친구 수만큼
+		// 질의가 나가므로 한 번에 받아 맞춰 넣는다.
+		std::vector<UnreadCount> Unread;
+		DirectMessages::GetUnreadCounts(Session->UserId, Unread);
+
+		std::vector<FriendEntry> Entries;
+		Entries.reserve(Rows.size());
+
+		for (const FriendRow& Row : Rows)
+		{
+			FriendEntry E{};
+			E.UserId = Row.UserId;
+			E.State  = static_cast<uint8_t>(Row.State);
+			CopyFixedString(E.Nickname, kMaxNameLen, Row.Nickname);
+
+			// ★ 아직 친구가 아닌 상대의 접속 상태는 알려주지 않는다.
+			//   신청만 걸어두면 남의 온/오프라인을 훔쳐볼 수 있게 되는 것을 막는다.
+			E.Presence = (Row.State == EFriendState::Friend)
+				? static_cast<uint8_t>(ComputePresence(Row.UserId))
+				: static_cast<uint8_t>(EPresence::Offline);
+
+			for (const UnreadCount& U : Unread)
+			{
+				if (U.PeerUserId == Row.UserId)
+				{
+					// 65535 를 넘을 일은 없지만, 넘으면 잘라서 보낸다.
+					E.UnreadCount = static_cast<uint16_t>(
+						U.Count > 0xFFFFu ? 0xFFFFu : U.Count);
+					break;
+				}
+			}
+
+			Entries.push_back(E);
+		}
+
+		FriendListAckBody Head{};
+		Head.Count = static_cast<uint16_t>(Entries.size());
+
+		return SendPacket2(Session->Sock, EOpcode::FriendListAck,
+		                   &Head, sizeof(Head),
+		                   Entries.empty() ? nullptr : Entries.data(),
+		                   static_cast<uint32_t>(Entries.size() * sizeof(FriendEntry)));
+	}
+
+	/** 닉네임으로 찾아 신청한다. 상대가 이미 나에게 신청해 뒀으면 즉시 친구가 된다. */
+	bool HandleFriendAddReq(const SessionPtr& Session, const char* Body, uint32_t BodySize)
+	{
+		auto SendAck = [&](EFriendResult R, uint64_t TargetId)
+		{
+			FriendAddAckBody Ack{};
+			Ack.TargetUserId = TargetId;
+			Ack.bSuccess     = (R == EFriendResult::Success) ? 1 : 0;
+			Ack.Result       = static_cast<uint8_t>(R);
+			return SendPacket(Session->Sock, EOpcode::FriendAddAck, &Ack, sizeof(Ack));
+		};
+
+		if (!Session->bAuthed)
+		{
+			return SendAck(EFriendResult::NotAuthed, 0);
+		}
+		if (BodySize < sizeof(FriendAddReqBody))
+		{
+			return SendAck(EFriendResult::InvalidFormat, 0);
+		}
+
+		FriendAddReqBody Req{};
+		std::memcpy(&Req, Body, sizeof(Req));
+
+		const std::string Query = ReadFixedString(Req.Query, kMaxFriendQueryLen);
+
+		uint64_t    TargetId = 0;
+		std::string TargetNick;
+		bool        bBecameFriends = false;
+
+		const EFriendResult R =
+			Friends::Add(Session->UserId, Query, TargetId, TargetNick, bBecameFriends);
+
+		if (R != EFriendResult::Success)
+		{
+			std::printf("[친구] %s 의 신청 실패: \"%s\" 사유=%u\n",
+			            Session->Name.c_str(), Query.c_str(), static_cast<unsigned>(R));
+			return SendAck(R, 0);
+		}
+
+		if (bBecameFriends)
+		{
+			// 맞신청이라 그 자리에서 친구가 됐다. 양쪽 다 갱신해야 한다.
+			SyncFriendCaches(Session->UserId, TargetId, /*bNowFriends=*/true);
+			SendFriendUpdate(TargetId, Session->UserId, Session->Name,
+			                 EFriendState::Friend, /*bRemoved=*/false);
+			SendFriendUpdate(Session->UserId, TargetId, TargetNick,
+			                 EFriendState::Friend, /*bRemoved=*/false);
+
+			std::printf("[친구] %s <-> %s 맞신청으로 친구 성립\n",
+			            Session->Name.c_str(), TargetNick.c_str());
+		}
+		else
+		{
+			// 대기 상태. 상대가 접속해 있으면 지금 알려준다.
+			// 오프라인이면 다음 로그인 때 FriendListAck 에 PendingIncoming 으로 들어간다.
+			if (const SessionPtr Target = FindAuthedSession(TargetId))
+			{
+				FriendRequestIncomingBody Note{};
+				Note.FromUserId = Session->UserId;
+				CopyFixedString(Note.FromNickname, kMaxNameLen, Session->Name);
+				SendPacket(Target->Sock, EOpcode::FriendRequestIncoming, &Note, sizeof(Note));
+			}
+
+			std::printf("[친구] %s -> %s 신청\n",
+			            Session->Name.c_str(), TargetNick.c_str());
+		}
+
+		return SendAck(EFriendResult::Success, TargetId);
+	}
+
+	/**
+	 * 받은 신청에 수락/거절한다.
+	 *
+	 * ★ 방향 검사는 Friends::Respond 안에 있다. 여기서 또 하지 않는다 —
+	 *   같은 판정이 두 곳에 있으면 언젠가 갈라진다.
+	 */
+	bool HandleFriendRespondReq(const SessionPtr& Session, const char* Body, uint32_t BodySize)
+	{
+		if (!Session->bAuthed || BodySize < sizeof(FriendRespondReqBody))
+		{
+			return true;
+		}
+
+		FriendRespondReqBody Req{};
+		std::memcpy(&Req, Body, sizeof(Req));
+
+		const bool bAccept = (Req.bAccept != 0);
+
+		const EFriendResult R = Friends::Respond(Session->UserId, Req.FromUserId, bAccept);
+		if (R != EFriendResult::Success)
+		{
+			std::printf("[친구] %s 의 응답 실패: from=%llu 사유=%u\n",
+			            Session->Name.c_str(),
+			            static_cast<unsigned long long>(Req.FromUserId),
+			            static_cast<unsigned>(R));
+			return true;
+		}
+
+		// ★ 상대가 오프라인이어도 이름이 필요하다 — 이 이름은 **나에게 가는**
+		//   FriendUpdate 에 실린다(ResolveNickname 주석).
+		const std::string FromNick = ResolveNickname(Req.FromUserId);
+
+		if (bAccept)
+		{
+			SyncFriendCaches(Session->UserId, Req.FromUserId, /*bNowFriends=*/true);
+
+			// 양쪽에 보낸다. 수락한 쪽도 자기 화면을 직접 고치지 않고 이 신호로
+			// 갱신하게 해야 두 클라가 같은 그림을 본다.
+			SendFriendUpdate(Req.FromUserId, Session->UserId, Session->Name,
+			                 EFriendState::Friend, /*bRemoved=*/false);
+			SendFriendUpdate(Session->UserId, Req.FromUserId, FromNick,
+			                 EFriendState::Friend, /*bRemoved=*/false);
+
+			std::printf("[친구] %s 가 %llu 의 신청을 수락\n",
+			            Session->Name.c_str(),
+			            static_cast<unsigned long long>(Req.FromUserId));
+		}
+		else
+		{
+			// 거절은 줄이 사라진 것이라 양쪽 목록에서 지워야 한다.
+			SendFriendUpdate(Req.FromUserId, Session->UserId, Session->Name,
+			                 EFriendState::Friend, /*bRemoved=*/true);
+			SendFriendUpdate(Session->UserId, Req.FromUserId, FromNick,
+			                 EFriendState::Friend, /*bRemoved=*/true);
+
+			std::printf("[친구] %s 가 %llu 의 신청을 거절\n",
+			            Session->Name.c_str(),
+			            static_cast<unsigned long long>(Req.FromUserId));
+		}
+
+		return true;
+	}
+
+	/** 친구를 끊거나 내가 보낸 신청을 취소한다. 둘 다 "그 줄을 지운다" 라서 같다. */
+	bool HandleFriendRemoveReq(const SessionPtr& Session, const char* Body, uint32_t BodySize)
+	{
+		if (!Session->bAuthed || BodySize < sizeof(FriendRemoveReqBody))
+		{
+			return true;
+		}
+
+		FriendRemoveReqBody Req{};
+		std::memcpy(&Req, Body, sizeof(Req));
+
+		const EFriendResult R = Friends::Remove(Session->UserId, Req.TargetUserId);
+		if (R != EFriendResult::Success)
+		{
+			return true;
+		}
+
+		SyncFriendCaches(Session->UserId, Req.TargetUserId, /*bNowFriends=*/false);
+
+		// 오프라인 상대여도 이름이 필요하다(ResolveNickname 주석).
+		const std::string TargetNick = ResolveNickname(Req.TargetUserId);
+
+		SendFriendUpdate(Req.TargetUserId, Session->UserId, Session->Name,
+		                 EFriendState::Friend, /*bRemoved=*/true);
+		SendFriendUpdate(Session->UserId, Req.TargetUserId, TargetNick,
+		                 EFriendState::Friend, /*bRemoved=*/true);
+
+		std::printf("[친구] %s 가 %llu 를 삭제\n",
+		            Session->Name.c_str(),
+		            static_cast<unsigned long long>(Req.TargetUserId));
+		return true;
+	}
+
+	// ------------------------------------------------------------------
+	// 메신저 1:1 DM (v7)
+	// ------------------------------------------------------------------
+
+	/**
+	 * DM 한 통을 한 사람에게 내보낸다. 오프라인이면 아무 일도 하지 않는다.
+	 *
+	 * 보낸 사람에게도 같은 형태로 되돌려준다 — 클라가 자기 화면에 먼저 그려두면
+	 * 서버가 매긴 MessageId/Timestamp 를 모르게 되고, 그러면 커서 페이징의
+	 * 기준이 클라마다 달라진다(ChatProtocol.h 의 DirectMessageBody 주석).
+	 */
+	void DeliverDirectMessage(uint64_t ToUserId, const DmRow& Row, uint64_t PeerToUserId)
+	{
+		const SessionPtr Target = FindAuthedSession(ToUserId);
+		if (!Target)
+		{
+			return;
+		}
+
+		DirectMessageBody Head{};
+		Head.MessageId  = Row.MessageId;
+		Head.FromUserId = Row.FromUserId;
+		Head.ToUserId   = PeerToUserId;
+		Head.Timestamp  = Row.Timestamp;
+		Head.TextLen    = static_cast<uint16_t>(Row.Text.size());
+
+		SendPacket2(Target->Sock, EOpcode::DirectMessage,
+		            &Head, sizeof(Head),
+		            Row.Text.empty() ? nullptr : Row.Text.data(),
+		            static_cast<uint32_t>(Row.Text.size()));
+	}
+
+	/**
+	 * DM 을 저장하고, 상대가 접속해 있으면 밀어준다.
+	 *
+	 * ★★ **저장이 먼저다.** 순서를 바꾸면 전송에는 성공했는데 기록이 없는
+	 *   메시지가 생기고, 대화창을 다시 열었을 때 방금 나눈 대화가 사라진다
+	 *   (DirectMessages.h 헤더 주석).
+	 */
+	bool HandleDirectMessageSend(const SessionPtr& Session, const char* Body, uint32_t BodySize)
+	{
+		if (!Session->bAuthed || BodySize < sizeof(DirectMessageSendBody))
+		{
+			return true;
+		}
+
+		DirectMessageSendBody Req{};
+		std::memcpy(&Req, Body, sizeof(Req));
+
+		// 본문은 구조체 뒤에 이어붙어 온다. 길이가 실제로 도착했는지 확인한다 —
+		// 이걸 안 보면 위조된 TextLen 으로 남의 메모리를 읽게 된다.
+		if (BodySize < sizeof(Req) + Req.TextLen || Req.TextLen == 0)
+		{
+			return true;
+		}
+		if (Req.TextLen > kMaxTextLen)
+		{
+			return true;
+		}
+
+		const char* Text = Body + sizeof(Req);
+
+		// ★★ 친구가 아니면 보낼 수 없다. 클라가 아무 UserId 에게나 쏘는 것을
+		//   서버가 막아야 한다 — UI 가 친구만 보여준다는 것은 방어가 아니다.
+		if (!Friends::AreFriends(Session->UserId, Req.TargetUserId))
+		{
+			std::printf("[거부] %s -> %llu DM: 친구가 아니다\n",
+			            Session->Name.c_str(),
+			            static_cast<unsigned long long>(Req.TargetUserId));
+			return true;
+		}
+
+		uint64_t MessageId = 0;
+		int64_t  Timestamp = 0;
+
+		if (!DirectMessages::Send(Session->UserId, Req.TargetUserId,
+		                          Text, Req.TextLen, MessageId, Timestamp))
+		{
+			std::printf("[오류] DM 저장 실패: %s -> %llu\n",
+			            Session->Name.c_str(),
+			            static_cast<unsigned long long>(Req.TargetUserId));
+			return true;
+		}
+
+		DmRow Row;
+		Row.MessageId  = MessageId;
+		Row.FromUserId = Session->UserId;
+		Row.Timestamp  = Timestamp;
+		Row.Text.assign(Text, Req.TextLen);
+
+		// 받는 사람에게. 오프라인이면 조용히 넘어가고, 다음 로그인 때
+		// 밀린 메시지로 받는다(저장은 위에서 이미 끝났다).
+		DeliverDirectMessage(Req.TargetUserId, Row, Req.TargetUserId);
+
+		// 보낸 사람에게도 되돌려준다(위 함수 주석).
+		DeliverDirectMessage(Session->UserId, Row, Req.TargetUserId);
+
+		std::printf("[DM] %s -> %llu (%u바이트)%s\n",
+		            Session->Name.c_str(),
+		            static_cast<unsigned long long>(Req.TargetUserId),
+		            Req.TextLen,
+		            FindAuthedSession(Req.TargetUserId) ? "" : " [오프라인 - 보관]");
+		return true;
+	}
+
+	/**
+	 * 로그인 직후 밀린 DM 을 내려준다.
+	 *
+	 * ★ 여기서 읽음 처리를 하지 않는다. 받는 것과 읽는 것은 다르다 —
+	 *   접속만 하고 대화창을 안 열었으면 여전히 안 읽은 것이고 배지도 떠 있어야
+	 *   한다. 읽음은 대화창을 열 때(DmHistoryReq) 찍힌다.
+	 */
+	void DeliverPendingDirectMessages(const SessionPtr& Session)
+	{
+		std::vector<DmRow> Pending;
+
+		// 상한을 둔다. 오래 안 들어온 계정에 수천 통이 쌓여 있으면 로그인
+		// 직후 그것을 한꺼번에 밀어넣게 되고, 그동안 다른 처리가 밀린다.
+		// 넘친 것은 대화창을 열 때 기록 조회로 따라온다.
+		if (!DirectMessages::GetPending(Session->UserId, kDmPageSize * 4, Pending))
+		{
+			return;
+		}
+
+		for (const DmRow& Row : Pending)
+		{
+			DeliverDirectMessage(Session->UserId, Row, Session->UserId);
+		}
+
+		if (!Pending.empty())
+		{
+			std::printf("[DM] %s 에게 밀린 메시지 %zu통 전달\n",
+			            Session->Name.c_str(), Pending.size());
+		}
+	}
+
+	/**
+	 * 대화 기록을 내려준다. 대화창을 열 때와 위로 스크롤할 때 같은 것을 쓴다.
+	 *
+	 * ★★ **가장 최근 페이지를 요청할 때(BeforeMessageId == 0)만 읽음 처리한다.**
+	 *
+	 *   그게 "대화창을 열었다" 는 뜻이기 때문이다. 위로 스크롤(커서 있음)에서도
+	 *   찍으면 옛날 기록을 훑어보는 것만으로 읽음이 되는데, 그때 새로 도착한
+	 *   메시지까지 같이 읽음이 되어 **배지가 사라진 채 못 본 메시지가 남는다.**
+	 *
+	 * ★ 클라가 "읽었다" 를 따로 보내지 않는 이유: 창을 여는 것이 곧 읽는 것이다.
+	 *   별도 옵코드를 두면 창은 열었는데 그 신호를 놓치는 경우가 생기고,
+	 *   그러면 배지가 영원히 안 사라진다(CHAT_DESIGN.md 6-2절).
+	 */
+	bool HandleDmHistoryReq(const SessionPtr& Session, const char* Body, uint32_t BodySize)
+	{
+		if (!Session->bAuthed || BodySize < sizeof(DmHistoryReqBody))
+		{
+			return true;
+		}
+
+		DmHistoryReqBody Req{};
+		std::memcpy(&Req, Body, sizeof(Req));
+
+		// ★ 친구가 아니면 기록도 볼 수 없다. 보내는 쪽만 막고 조회를 열어두면
+		//   과거에 친구였던 사람의 대화를 계속 들여다볼 수 있게 된다.
+		if (!Friends::AreFriends(Session->UserId, Req.PeerUserId))
+		{
+			DmHistoryAckBody Empty{};
+			Empty.PeerUserId = Req.PeerUserId;
+			return SendPacket(Session->Sock, EOpcode::DmHistoryAck, &Empty, sizeof(Empty));
+		}
+
+		std::vector<DmRow> Rows;
+		bool bHasMore = false;
+
+		if (!DirectMessages::GetHistory(Session->UserId, Req.PeerUserId,
+		                                Req.BeforeMessageId, kDmPageSize, Rows, bHasMore))
+		{
+			DmHistoryAckBody Empty{};
+			Empty.PeerUserId = Req.PeerUserId;
+			return SendPacket(Session->Sock, EOpcode::DmHistoryAck, &Empty, sizeof(Empty));
+		}
+
+		// 최신 페이지 = 대화창을 연 것 = 읽음(위 ★★).
+		if (Req.BeforeMessageId == 0)
+		{
+			DirectMessages::MarkRead(Session->UserId, Req.PeerUserId);
+		}
+
+		// --- 가변 길이 본문을 이어붙인다 ---
+		//
+		// ★ DmEntry 는 고정 크기가 아니다. 뒤에 TextLen 바이트가 따라오므로
+		//   받는 쪽도 배열 인덱싱이 아니라 순회로 읽어야 한다(ChatProtocol.h).
+		std::vector<char> Tail;
+
+		for (const DmRow& Row : Rows)
+		{
+			DmEntry E{};
+			E.MessageId  = Row.MessageId;
+			E.FromUserId = Row.FromUserId;
+			E.Timestamp  = Row.Timestamp;
+			E.TextLen    = static_cast<uint16_t>(Row.Text.size());
+
+			const char* Head = reinterpret_cast<const char*>(&E);
+			Tail.insert(Tail.end(), Head, Head + sizeof(E));
+			Tail.insert(Tail.end(), Row.Text.begin(), Row.Text.end());
+		}
+
+		DmHistoryAckBody Ack{};
+		Ack.PeerUserId = Req.PeerUserId;
+		Ack.Count      = static_cast<uint16_t>(Rows.size());
+		Ack.bHasMore   = bHasMore ? 1 : 0;
+
+		return SendPacket2(Session->Sock, EOpcode::DmHistoryAck,
+		                   &Ack, sizeof(Ack),
+		                   Tail.empty() ? nullptr : Tail.data(),
+		                   static_cast<uint32_t>(Tail.size()));
+	}
+
 	bool HandlePacket(const SessionPtr& Session, const PacketHeader& Header,
 	                  const std::vector<char>& Body)
 	{
@@ -750,6 +1520,17 @@ namespace
 		case EOpcode::RoomHostReadyReq: return HandleRoomHostReadyReq(Session, Data, Size);
 		case EOpcode::ChatSend:  return HandleChatSend(Session, Data, Size);
 		case EOpcode::SetDead:   return HandleSetDead(Session, Data, Size);
+
+		// --- 친구 (v7) ---
+		case EOpcode::FriendListReq:    return HandleFriendListReq(Session, Data, Size);
+		case EOpcode::FriendAddReq:     return HandleFriendAddReq(Session, Data, Size);
+		case EOpcode::FriendRespondReq: return HandleFriendRespondReq(Session, Data, Size);
+		case EOpcode::FriendRemoveReq:  return HandleFriendRemoveReq(Session, Data, Size);
+
+		// --- 메신저 (v7) ---
+		case EOpcode::DirectMessageSend: return HandleDirectMessageSend(Session, Data, Size);
+		case EOpcode::DmHistoryReq:      return HandleDmHistoryReq(Session, Data, Size);
+
 		case EOpcode::Heartbeat: return true;
 		default:
 			std::printf("[경고] 알 수 없는 오피코드 %u\n", Header.Opcode);
@@ -818,6 +1599,13 @@ namespace
 		if (Session->bAuthed)
 		{
 			LeaveRoomAndNotify(Session);
+
+			// ★ 친구에게 오프라인을 알린다 (M4). **Remove 보다 먼저** 해야 한다 -
+			//   세션이 목록에서 빠진 뒤에는 FriendIds 캐시를 읽을 수 없고,
+			//   그러면 친구들 화면에 이 사람이 영원히 온라인으로 남는다.
+			//
+			//   정상 종료든 랜선이 뽑혔든 이 자리를 지나가므로 한 곳에서 끝난다.
+			BroadcastPresence(Session, EPresence::Offline);
 		}
 
 		std::printf("[종료] %s (UserId=%llu) 연결 해제\n",
@@ -839,10 +1627,68 @@ int main(int argc, char** argv)
 	// MSVC 는 _IOLBF(줄 버퍼링)를 _IOFBF 와 동일하게 처리하므로 무버퍼로 둔다.
 	::setvbuf(stdout, nullptr, _IONBF, 0);
 
-	if (argc < 2 || argc > 3)
+	// 인자 파싱. --upnp / --public-ip 는 어디에 와도 되고,
+	// 나머지는 순서대로 <port> [db경로] 다.
+	bool        bUseUpnp = false;
+	const char* PortArg  = nullptr;
+	const char* DbArg    = nullptr;
+
+	for (int Index = 1; Index < argc; ++Index)
 	{
-		std::printf("사용법: %s <port> [db경로]\n", argv[0]);
+		if (std::strcmp(argv[Index], "--upnp") == 0)
+		{
+			bUseUpnp = true;
+		}
+		// --public-ip=1.2.3.4 와 --public-ip 1.2.3.4 를 둘 다 받는다.
+		// 붙여 쓰는 쪽만 지원하면 공백을 넣었을 때 그 값이 db경로로 먹혀
+		// 엉뚱한 파일에 계정이 생기는 사고가 난다 (--upnp 때 겪은 그것과 같다).
+		else if (std::strncmp(argv[Index], "--public-ip=", 12) == 0)
+		{
+			GPublicIp = argv[Index] + 12;
+		}
+		else if (std::strcmp(argv[Index], "--public-ip") == 0)
+		{
+			if (Index + 1 >= argc)
+			{
+				std::printf("[오류] --public-ip 뒤에 주소가 없다.\n");
+				return 1;
+			}
+			GPublicIp = argv[++Index];
+		}
+		else if (PortArg == nullptr)
+		{
+			PortArg = argv[Index];
+		}
+		else if (DbArg == nullptr)
+		{
+			DbArg = argv[Index];
+		}
+		else
+		{
+			PortArg = nullptr;   // 인자가 너무 많다. 사용법을 보여준다
+			break;
+		}
+	}
+
+	// 사설 주소를 공인 IP 라고 우기면 치환이 오히려 상황을 악화시킨다.
+	// 조용히 무시하지 말고 여기서 멈춰서 알려준다.
+	if (!GPublicIp.empty() && IsPrivateAddress(GPublicIp))
+	{
+		std::printf("[오류] --public-ip 에 사설 주소(%s)를 줬다. 공인 IP 를 줘야 한다.\n",
+		            GPublicIp.c_str());
+		return 1;
+	}
+
+	if (PortArg == nullptr)
+	{
+		std::printf("사용법: %s <port> [db경로] [--upnp] [--public-ip <주소>]\n", argv[0]);
 		std::printf("  db경로를 생략하면 현재 디렉터리의 chat_log.db 를 쓴다.\n");
+		std::printf("  --upnp : 공유기(UPnP)에 이 포트를 자동으로 열어달라고 요청한다.\n");
+		std::printf("           다른 네트워크에서 접속시킬 때만 필요하다. 같은 공유기\n");
+		std::printf("           안에서만 쓸 거라면 켤 이유가 없다.\n");
+		std::printf("  --public-ip : 이 서버의 공인 IP. 방장이 서버와 같은 공유기 안에\n");
+		std::printf("           있을 때, 방의 호스트 주소로 사설 IP 대신 이 값을 기록한다.\n");
+		std::printf("           안 주면 --upnp 성공 시 알아낸 값을 자동으로 쓴다.\n");
 		return 1;
 	}
 
@@ -862,7 +1708,7 @@ int main(int argc, char** argv)
 	sockaddr_in ServerAddr{};
 	ServerAddr.sin_family      = AF_INET;
 	ServerAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	ServerAddr.sin_port        = htons(static_cast<uint16_t>(std::atoi(argv[1])));
+	ServerAddr.sin_port        = htons(static_cast<uint16_t>(std::atoi(PortArg)));
 
 	if (::bind(ListenSock, reinterpret_cast<sockaddr*>(&ServerAddr), sizeof(ServerAddr)) != 0)
 	{
@@ -880,7 +1726,7 @@ int main(int argc, char** argv)
 
 	// 채팅 로그 DB. 두 번째 인자로 경로를 바꿀 수 있다 (테스트용으로 분리할 때 편하다).
 	// 열기에 실패해도 서버는 계속 돈다. 로그가 안 남는 것보다 채팅이 끊기는 게 나쁘다.
-	const char* DbPath = (argc >= 3) ? argv[2] : "chat_log.db";
+	const char* DbPath = (DbArg != nullptr) ? DbArg : "chat_log.db";
 	ChatLog::Start(DbPath);
 
 	// 계정도 같은 파일에 둔다(테이블이 다르므로 섞이지 않는다).
@@ -891,7 +1737,77 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	std::printf("=== MOU 채팅 서버 시작 (port %s) ===\n", argv[1]);
+	// v7 친구 + 메신저. 같은 파일, 각자 별도 커넥션(Accounts 와 같은 이유).
+	//
+	// ★ 실패해도 서버를 죽이지 않는다. 계정과 심각도가 다르다 - 로그인은
+	//   못 하면 아무것도 안 되지만, 친구 목록이 안 뜨는 것은 게임과 채팅을
+	//   막지 않는다. 대신 왜 안 되는지는 분명히 말해준다.
+	if (!Friends::Start(DbPath))
+	{
+		std::printf("[경고] 친구 DB 를 열지 못했다. 친구 기능만 동작하지 않는다.\n");
+	}
+	if (!DirectMessages::Start(DbPath))
+	{
+		std::printf("[경고] 메신저 DB 를 열지 못했다. DM 만 동작하지 않는다.\n");
+	}
+
+	// 공유기에 이 포트를 열어달라고 요청한다. 블로킹이라 accept 루프 전에 끝낸다.
+	//
+	// ★ 실패해도 서버는 그대로 뜬다. 같은 네트워크에서는 어차피 접속되고,
+	//   UPnP 가 안 되는 것은 "이 경로로는 못 간다" 는 뜻이지 서버 오류가 아니다.
+	if (bUseUpnp)
+	{
+		const uint16_t ListenPort = static_cast<uint16_t>(std::atoi(PortArg));
+		const Nat::EResult Result = Nat::Start(ListenPort, /*bTcp=*/true);
+
+		if (Result == Nat::EResult::Success)
+		{
+			std::printf("[NAT] 외부에서는 %s:%u 로 접속하면 된다.\n",
+				Nat::ExternalIp().empty() ? "<외부IP>" : Nat::ExternalIp().c_str(),
+				static_cast<unsigned>(Nat::MappedExternalPort()));
+
+			// 공유기가 다른 외부 포트를 열어준 경우, 클라이언트는 그 포트로 붙어야 한다.
+			if (Nat::MappedExternalPort() != ListenPort)
+			{
+				std::printf("[NAT] ★ 내부 포트와 외부 포트가 다르다. 클라이언트의 서버 주소를\n");
+				std::printf("        외부 포트(%u)로 설정해야 한다.\n",
+					static_cast<unsigned>(Nat::MappedExternalPort()));
+			}
+
+			// UPnP 가 알아낸 외부 IP 를 방 호스트 주소 치환에도 쓴다.
+			// 명시적으로 --public-ip 를 준 쪽이 이긴다 — 사람이 준 값이
+			// 더 정확한 상황(공유기가 외부 IP 를 잘못 보고하는 경우)이 있다.
+			if (GPublicIp.empty() && !Nat::ExternalIp().empty()
+			    && !IsPrivateAddress(Nat::ExternalIp()))
+			{
+				GPublicIp = Nat::ExternalIp();
+				std::printf("[NAT] 공인 IP %s 를 방 호스트 주소 치환에 쓴다.\n",
+					GPublicIp.c_str());
+			}
+		}
+		else
+		{
+			std::printf("[NAT] 포트를 열지 못했다: %s\n", Nat::ResultText(Result));
+			std::printf("[NAT] 같은 네트워크에서만 접속할 수 있다. 서버는 그대로 계속한다.\n");
+		}
+	}
+
+	// 방장이 서버와 같은 공유기 안에 있을 때 무엇으로 바꿔 기록할지.
+	// 이게 비어 있으면 예전 동작 그대로이고, 그 조합에서만 외부 참가자가
+	// 사설 주소를 받아 무한 로딩에 걸린다. 켤 때 분명히 보이게 찍어둔다.
+	if (!GPublicIp.empty())
+	{
+		std::printf("[방 주소] 방장이 이 서버와 같은 네트워크에 있으면 호스트 주소를 %s 로 기록한다.\n",
+			GPublicIp.c_str());
+		std::printf("[방 주소] 그 방장의 리슨서버 포트(보통 7777/UDP)도 공유기에 열려 있어야 한다.\n");
+	}
+	else
+	{
+		std::printf("[방 주소] --public-ip 가 없다. 방장이 이 서버와 같은 공유기 안이면\n");
+		std::printf("          외부 참가자에게 사설 주소가 전달되어 접속하지 못한다.\n");
+	}
+
+	std::printf("=== MOU 서버 시작 (port %s) ===\n", PortArg);
 
 	while (GRunning)
 	{
@@ -924,6 +1840,8 @@ int main(int argc, char** argv)
 
 	ChatLog::Stop();
 	Accounts::Stop();
+	Friends::Stop();
+	DirectMessages::Stop();
 	CloseSocket(ListenSock);
 	NetShutdown();
 	return 0;

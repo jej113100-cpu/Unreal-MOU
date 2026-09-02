@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Interfaces/InteractableInterface.h"
+#include "Item/ItemSaveData.h"
 #include "ItemBase.generated.h"
 
 class UStaticMeshComponent;
@@ -28,10 +29,6 @@ public:
 	// ---------------------------------------------------------
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> MeshComponent;
-
-	// 아이템 정보를 화면에 띄워줄 위젯 컴포넌트
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<class UWidgetComponent> InfoWidgetComponent;
 
 	// ---------------------------------------------------------
 	// [기본 아이템 데이터]
@@ -80,14 +77,9 @@ public:
 	virtual void Interact_Implementation(AActor* Interactor) override;
 	virtual FText GetInteractPrompt_Implementation() const override;
 
-	// ---------------------------------------------------------
-	// [UI / 정보 표시]
-	// ---------------------------------------------------------
-	UFUNCTION(BlueprintCallable, Category = "Item|UI")
-	virtual void ShowItemInfo();
-
-	UFUNCTION(BlueprintCallable, Category = "Item|UI")
-	virtual void HideItemInfo();
+	// 다른 캐릭터가 이 아이템을 집을 수 있는지 검사 (다른 사람이 들고 있는 아이템 뺏어가기 방지)
+	UFUNCTION(BlueprintCallable, Category = "Item|Action")
+	virtual bool CanBePickedUpBy(AActor* PotentialPicker) const;
 
 	// ---------------------------------------------------------
 	// [핵심 행동 함수]
@@ -138,4 +130,17 @@ public:
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastOnUnequipped(AActor* Equipper);
+
+	// ---------------------------------------------------------
+	// [저장 / 복원]
+	// ---------------------------------------------------------
+	// ItemBase가 공통 상태를 저장하고, 자식 클래스는 오버라이드로 ExtraSaveData를 추가합니다.
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Item|Save")
+	void SaveItemToData(UPARAM(ref) FStoredItemInstanceData& OutData) const;
+	virtual void SaveItemToData_Implementation(FStoredItemInstanceData& OutData) const;
+
+	// 저장된 공통 상태를 복원합니다. 자식 클래스는 오버라이드로 자기 전용 ExtraSaveData를 읽습니다.
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Item|Save")
+	void LoadItemFromData(const FStoredItemInstanceData& InData);
+	virtual void LoadItemFromData_Implementation(const FStoredItemInstanceData& InData);
 };

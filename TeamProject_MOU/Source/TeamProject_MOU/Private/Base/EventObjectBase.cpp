@@ -1,56 +1,193 @@
 #include "Base/EventObjectBase.h"
 #include "Player/MainCharacter.h"
+#include "Base/BaseAttributeSet.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/BoxComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
-#include "Components/WidgetComponent.h"
 #include "Net/UnrealNetwork.h"
 
 AEventObjectBase::AEventObjectBase()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	// 보통 이벤트 오브젝트는 조금 무거운 느낌으로 설정
+	// 보통 이벤트 오브젝트는 무거운 느낌으로 설정
 	ItemWeight = 50.0f;
+	PhysicalMassInKg = 1000.0f;
+	MinRequiredGroundPoints = 3; // 9개 포인트 중 최소 3개 이상 지지되어야 밀기 유지
+	GroundTraceTolerance = 50.0f; // 실제 지지 접촉면만 감지하기 위한 하방 거리
 	bCanBeStoredInInventory = false;
+
+	if (MeshComponent)
+	{
+		MeshComponent->SetLinearDamping(1.0f);
+		MeshComponent->SetAngularDamping(1.5f);
+	}
+
+	// 지면/터널관 감지 전용 박스 컴포넌트 생성 (물리 충돌 없음, 뷰포트에서 기즈모로 조절 가능)
+	GroundDetectorBox = CreateDefaultSubobject<UBoxComponent>(TEXT("GroundDetectorBox"));
+	GroundDetectorBox->SetupAttachment(RootComponent);
+	GroundDetectorBox->SetCollisionProfileName(TEXT("NoCollision"));
+	GroundDetectorBox->SetBoxExtent(FVector(150.0f, 150.0f, 10.0f));
+	GroundDetectorBox->bHiddenInGame = false;
+	GroundDetectorBox->SetLineThickness(2.0f);
 }
 
 void AEventObjectBase::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 밀기 전용 오브젝트의 경우 질량을 매우 높게 설정하여 캐릭터가 부딪혀서 밀리는 것을 방지
+	// 평상시(대기 상태)에는 순수 언리얼 물리 엔진에 위임
+	// 메쉬 형상에 따라 경사로에서 자연스럽게 안착/미끄러짐/굴러감
 	if (bIsPushable)
 	{
-		if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(GetRootComponent()))
-		{
-			// 물리 충돌로 밀리는 현상 방지: 아예 물리 시뮬레이션을 끄고 스크립트로만 이동하게 만듦
-			PrimComp->SetSimulatePhysics(false);
+		SetPhysicsSimulateEnabled(true);
+	}
+}
 
-			// 레벨에 살짝 떠있을 경우를 대비해 시작 시 바닥으로 강제 스냅
-			FVector BoxCenter, BoxExtents;
-			GetActorBounds(false, BoxCenter, BoxExtents);
-			FHitResult GroundHit;
-			FVector Start = BoxCenter;
-			FVector End = Start - FVector(0, 0, 1000.0f);
-			FCollisionQueryParams Params;
-			Params.AddIgnoredActor(this);
-			if (GetWorld()->LineTraceSingleByChannel(GroundHit, Start, End, ECC_Visibility, Params))
+void AEventObjectBase::SetPhysicsSimulateEnabled(bool bEnablePhysics)
+{
+	if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(GetRootComponent()))
+	{
+		// 키네마틱 전환 전/물리 활성화 전 잔여 물리 속도/각속도 소멸
+		PrimComp->SetPhysicsLinearVelocity(FVector::ZeroVector);
+		PrimComp->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+		PrimComp->PutRigidBodyToSleep();
+
+		PrimComp->SetSimulatePhysics(bEnablePhysics);
+
+		if (bEnablePhysics)
+		{
+			// 물리 활성화 직후에도 잔여 임펄스 및 반발 속도 완전 초기화
+			PrimComp->SetPhysicsLinearVelocity(FVector::ZeroVector);
+			PrimComp->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+
+			if (PhysicalMassInKg > 0.0f)
 			{
-				// (원하는 바닥 위치 + 상자 반 높이) - 현재 상자 중심 = 이동해야 할 Z 거리
-				float TargetCenterZ = GroundHit.ImpactPoint.Z + BoxExtents.Z;
-				float ZOffset = TargetCenterZ - BoxCenter.Z;
-				AddActorWorldOffset(FVector(0, 0, ZOffset));
+				PrimComp->SetMassOverrideInKg(NAME_None, PhysicalMassInKg, true);
+			}
+			PrimComp->WakeRigidBody();
+		}
+	}
+}
+
+bool AEventObjectBase::CheckGroundSupport(FHitResult& OutFloorHit, int32& OutSupportedCount, float& OutSupportZ) const
+{
+	OutSupportedCount = 0;
+
+	FVector Center = GetActorLocation();
+	FVector ScaledExtent = FVector(150.0f, 150.0f, 10.0f);
+	FQuat Rot = GetActorQuat();
+
+	if (GroundDetectorBox)
+	{
+		Center = GroundDetectorBox->GetComponentLocation();
+		ScaledExtent = GroundDetectorBox->GetScaledBoxExtent();
+		Rot = GroundDetectorBox->GetComponentQuat();
+	}
+
+	FVector Forward = Rot.GetForwardVector();
+	FVector Right = Rot.GetRightVector();
+	FVector Up = Rot.GetUpVector();
+
+	FVector BottomCenter = Center - (Up * ScaledExtent.Z);
+	OutSupportZ = BottomCenter.Z;
+
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+	for (const TObjectPtr<AMainCharacter>& Pusher : CurrentPushers)
+	{
+		if (Pusher) Params.AddIgnoredActor(Pusher);
+	}
+
+	// [9-포인트 3x3 그리드 구성: 정중앙 1개, 4개 코너 모서리, 4개 변 중앙]
+	TArray<FVector> SamplePoints;
+	SamplePoints.Add(BottomCenter); // 1. 정중앙 하단
+
+	// 4개 코너 모서리 (Corner Points)
+	SamplePoints.Add(BottomCenter + Forward * ScaledExtent.X + Right * ScaledExtent.Y); // 2. 전방 우측 모서리
+	SamplePoints.Add(BottomCenter + Forward * ScaledExtent.X - Right * ScaledExtent.Y); // 3. 전방 좌측 모서리
+	SamplePoints.Add(BottomCenter - Forward * ScaledExtent.X + Right * ScaledExtent.Y); // 4. 후방 우측 모서리
+	SamplePoints.Add(BottomCenter - Forward * ScaledExtent.X - Right * ScaledExtent.Y); // 5. 후방 좌측 모서리
+
+	// 4개 변의 가운데 (Edge Midpoints)
+	SamplePoints.Add(BottomCenter + Forward * ScaledExtent.X); // 6. 전방 중앙
+	SamplePoints.Add(BottomCenter - Forward * ScaledExtent.X); // 7. 후방 중앙
+	SamplePoints.Add(BottomCenter + Right * ScaledExtent.Y);   // 8. 우측 중앙
+	SamplePoints.Add(BottomCenter - Right * ScaledExtent.Y);   // 9. 좌측 중앙
+
+	FVector SumNormal = FVector::ZeroVector;
+	float MaxHitZ = -FLT_MAX;
+	FHitResult FirstHit;
+	bool bFoundHit = false;
+
+	const float UpOffset = 25.0f;
+
+	for (const FVector& Pt : SamplePoints)
+	{
+		FVector TraceStart = Pt + (Up * UpOffset);
+		FVector TraceEnd = Pt - FVector(0, 0, GroundTraceTolerance);
+		
+		FHitResult Hit;
+		bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params);
+
+		if (bHit)
+		{
+			OutSupportedCount++;
+			SumNormal += Hit.ImpactNormal;
+			MaxHitZ = FMath::Max(MaxHitZ, Hit.ImpactPoint.Z);
+
+			if (!bFoundHit)
+			{
+				FirstHit = Hit;
+				bFoundHit = true;
+			}
+
+			if (bShowDebugGroundTrace)
+			{
+				DrawDebugLine(GetWorld(), TraceStart, Hit.ImpactPoint, FColor::Green, false, -1.0f, 0, 2.0f);
+				DrawDebugPoint(GetWorld(), Hit.ImpactPoint, 10.0f, FColor::Green, false, -1.0f);
+			}
+		}
+		else
+		{
+			if (bShowDebugGroundTrace)
+			{
+				DrawDebugLine(GetWorld(), TraceStart, TraceEnd, FColor::Red, false, -1.0f, 0, 1.5f);
+				DrawDebugPoint(GetWorld(), TraceEnd, 8.0f, FColor::Red, false, -1.0f);
 			}
 		}
 	}
 
-	// [요구사항] 이벤트 오브젝트는 Info Widget을 표시하지 않음
-	if (InfoWidgetComponent)
+	if (bFoundHit && OutSupportedCount > 0)
 	{
-		InfoWidgetComponent->DestroyComponent();
-		InfoWidgetComponent = nullptr;
+		OutFloorHit = FirstHit;
+		OutFloorHit.ImpactNormal = (SumNormal / OutSupportedCount).GetSafeNormal();
+		if (OutFloorHit.ImpactNormal.IsNearlyZero())
+		{
+			OutFloorHit.ImpactNormal = FVector::UpVector;
+		}
+		OutSupportZ = MaxHitZ;
 	}
+	else
+	{
+		OutFloorHit.ImpactNormal = FVector::UpVector;
+		OutSupportZ = BottomCenter.Z;
+	}
+
+	if (bShowDebugGroundTrace)
+	{
+		DrawDebugBox(GetWorld(), Center, ScaledExtent, Rot, FColor::Cyan, false, -1.0f, 0, 1.5f);
+
+		bool bPassed = OutSupportedCount >= MinRequiredGroundPoints;
+		FString StatusText = FString::Printf(TEXT("Ground: %d/%d (Min:%d) - %s"), 
+			OutSupportedCount, SamplePoints.Num(), MinRequiredGroundPoints, bPassed ? TEXT("SUPPORTED") : TEXT("FALLING"));
+		DrawDebugString(GetWorld(), Center + FVector(0, 0, ScaledExtent.Z + 30.0f), StatusText, nullptr, 
+			bPassed ? FColor::Green : FColor::Red, 0.0f, true, 1.2f);
+	}
+
+	return OutSupportedCount >= MinRequiredGroundPoints;
 }
 
 void AEventObjectBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -60,55 +197,145 @@ void AEventObjectBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(AEventObjectBase, CurrentPushers);
 }
 
-
 void AEventObjectBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// 바닥에 떨어졌는지 체크 (추락 후 착지 감지)
-	if (bIsFallingFromLedge)
+	if (bShowDebugGroundTrace && CurrentPushers.Num() == 0)
 	{
-		if (FallTimer > 0.0f)
+		FHitResult IdleFloorHit;
+		int32 IdleSupportedCount = 0;
+		float IdleSupportZ = 0.0f;
+		CheckGroundSupport(IdleFloorHit, IdleSupportedCount, IdleSupportZ);
+	}
+
+	if (HasAuthority() && bIsPushable && CurrentPushers.Num() > 0)
+	{
+		TArray<AMainCharacter*> PushersToDetach;
+		for (AMainCharacter* Pusher : CurrentPushers)
 		{
-			FallTimer -= DeltaTime;
-		}
-		else
-		{
-			// 속도가 0에 가까워지면 착지한 것으로 간주
-			if (GetVelocity().SizeSquared() < 10.0f)
+			if (!Pusher) continue;
+
+			FVector LocalAnchor = PusherLocalAnchorMap.Contains(Pusher)
+				? PusherLocalAnchorMap[Pusher]
+				: GetActorTransform().InverseTransformPosition(Pusher->GetActorLocation());
+			FVector WorldAnchor = GetActorTransform().TransformPosition(LocalAnchor);
+			float Dist2D = FVector::Dist2D(Pusher->GetActorLocation(), WorldAnchor);
+
+			if (Dist2D > PushDetachDistance)
 			{
-				bIsFallingFromLedge = false;
-				if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(GetRootComponent()))
+				PushersToDetach.Add(Pusher);
+				UE_LOG(LogTemp, Warning, TEXT("[%s] 푸셔(%s)가 손 앵커에서 %fcm 멀어져(허용 %fcm) 밀기 모드가 자동 해제됩니다!"),
+					*GetName(), *Pusher->GetName(), Dist2D, PushDetachDistance);
+			}
+		}
+
+		for (AMainCharacter* Pusher : PushersToDetach)
+		{
+			Pusher->StopPushMode();
+		}
+
+		if (IsReadyToMove())
+		{
+			FHitResult FloorHit;
+			int32 SupportedPoints = 0;
+			float SupportZ = 0.0f;
+			bool bIsSupported = CheckGroundSupport(FloorHit, SupportedPoints, SupportZ);
+
+			if (!bIsSupported)
+			{
+				MulticastFallOffLedge();
+				return;
+			}
+
+			FVector TotalPushDir = FVector::ZeroVector;
+			float TotalPushSpeed = 0.0f;
+			int32 ActiveCount = 0;
+
+			for (const TObjectPtr<AMainCharacter>& Pusher : CurrentPushers)
+			{
+				if (Pusher && FMath::Abs(Pusher->GetCurrentPushInput()) > 0.1f)
 				{
-					// 몸으로 밀리지 않도록 다시 물리 시뮬레이션 끄기
-					PrimComp->SetSimulatePhysics(false);
-					
-					// 바닥에 정확히 스냅
-					FVector BoxCenter, BoxExtents;
-					GetActorBounds(false, BoxCenter, BoxExtents);
-					FHitResult GroundHit;
-					FVector Start = BoxCenter;
-					FVector End = Start - FVector(0, 0, 1000.0f);
-					FCollisionQueryParams Params;
-					Params.AddIgnoredActor(this);
-					if (GetWorld()->LineTraceSingleByChannel(GroundHit, Start, End, ECC_Visibility, Params))
+					float Input = Pusher->GetCurrentPushInput();
+					float PushInputSign = FMath::Sign(Input);
+					TotalPushDir += Pusher->LockedPushDirection * PushInputSign;
+
+					float Speed = Pusher->GetCharacterMovement() ? Pusher->GetCharacterMovement()->MaxWalkSpeed : 300.0f;
+					TotalPushSpeed += Speed;
+					ActiveCount++;
+				}
+			}
+
+			if (ActiveCount > 0)
+			{
+				FVector PushDir = TotalPushDir / ActiveCount;
+				PushDir.Z = 0.0f;
+				PushDir.Normalize();
+
+				FVector SlopeMoveDir = FVector::VectorPlaneProject(PushDir, FloorHit.ImpactNormal).GetSafeNormal();
+				if (SlopeMoveDir.IsNearlyZero())
+				{
+					SlopeMoveDir = PushDir;
+				}
+
+				float AvgSpeed = TotalPushSpeed / ActiveCount;
+				FVector DeltaMove = SlopeMoveDir * (AvgSpeed * DeltaTime);
+
+				if (!DeltaMove.IsNearlyZero())
+				{
+					FVector DetectorCenter = GroundDetectorBox ? GroundDetectorBox->GetComponentLocation() : GetActorLocation();
+					FVector DetectorExtents = GroundDetectorBox ? GroundDetectorBox->GetScaledBoxExtent() : FVector(150.0f, 150.0f, 20.0f);
+
+					FVector TraceStart = DetectorCenter + FVector(0, 0, DetectorExtents.Z + 20.0f);
+					FVector TraceEnd = TraceStart + DeltaMove;
+
+					FCollisionQueryParams BoxParams;
+					BoxParams.AddIgnoredActor(this);
+					for (const TObjectPtr<AMainCharacter>& Pusher : CurrentPushers)
 					{
-						float TargetCenterZ = GroundHit.ImpactPoint.Z + BoxExtents.Z;
-						float ZOffset = TargetCenterZ - BoxCenter.Z;
-						AddActorWorldOffset(FVector(0, 0, ZOffset));
+						if (Pusher) BoxParams.AddIgnoredActor(Pusher);
+					}
+
+					FHitResult BoxHit;
+					bool bHitObstacle = GetWorld()->SweepSingleByChannel(
+						BoxHit, TraceStart, TraceEnd,
+						GetActorQuat(), ECC_Visibility,
+						FCollisionShape::MakeBox(FVector(DetectorExtents.X * 0.85f, DetectorExtents.Y * 0.85f, DetectorExtents.Z * 0.8f)), BoxParams);
+
+					if (!bHitObstacle || FMath::Abs(BoxHit.ImpactNormal.Z) >= 0.5f)
+					{
+						FVector NewLocation = GetActorLocation() + DeltaMove;
+
+						if (GroundDetectorBox)
+						{
+							float CurrentBottomZ = GroundDetectorBox->GetComponentLocation().Z - GroundDetectorBox->GetScaledBoxExtent().Z;
+							float TargetBottomZ = SupportZ;
+							float DiffZ = TargetBottomZ - CurrentBottomZ;
+
+							if (DiffZ > 0.0f)
+							{
+								NewLocation.Z += DiffZ;
+							}
+						}
+
+						SetActorLocation(NewLocation, false);
 					}
 				}
 			}
 		}
 	}
 
-	// 디버그 라인 그리기 (바운딩 박스 정중앙 기준)
+
+
+
+	// 디버그 라인 그리기 (GroundDetectorBox 중심 기준)
 	if (bShowDebugPushDistance)
 	{
-		FVector BoxCenter = GetComponentsBoundingBox().GetCenter();
+		FVector BoxCenter = GroundDetectorBox ? GroundDetectorBox->GetComponentLocation() : GetActorLocation();
 		DrawDebugCircle(GetWorld(), BoxCenter, MaxPushDistance, 32, FColor::Green, false, -1.0f, 0, 2.0f, FVector(0, 1, 0), FVector(1, 0, 0), false);
 	}
 }
+
 
 float AEventObjectBase::GetPushResistance_Implementation() const
 {
@@ -117,8 +344,26 @@ float AEventObjectBase::GetPushResistance_Implementation() const
 
 void AEventObjectBase::Push_Implementation(AActor* Pusher, FVector PushDirection)
 {
-	// 기존의 IPushableInterface 통로
-	// 이제 MainCharacter가 직접 StartPushMode를 호출할 것이므로 이곳에서는 추가 로직이 필요 없을 수도 있습니다.
+}
+
+bool AEventObjectBase::CanInteract_Implementation(AActor* Interactor) const
+{
+	if (!bIsPushable || !Interactor)
+	{
+		return false;
+	}
+
+	FVector ClosestPoint;
+	if (GroundDetectorBox)
+	{
+		GroundDetectorBox->GetClosestPointOnCollision(Interactor->GetActorLocation(), ClosestPoint);
+	}
+	else
+	{
+		ClosestPoint = GetActorLocation();
+	}
+	float Dist2D = FVector::Dist2D(Interactor->GetActorLocation(), ClosestPoint);
+	return Dist2D <= MaxPushDistance;
 }
 
 void AEventObjectBase::Interact_Implementation(AActor* Interactor)
@@ -127,24 +372,59 @@ void AEventObjectBase::Interact_Implementation(AActor* Interactor)
 
 	if (!bIsPushable)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("밀기 불가: bIsPushable이 꺼져 있습니다."));
 		return;
 	}
 
-	// 거리 체크: 캐릭터의 위치와 오브젝트의 바운딩 박스 정중앙 간의 수평(2D) 거리 계산 (높이 무시)
-	FVector BoxCenter = GetComponentsBoundingBox().GetCenter();
-	float Dist = FVector::Dist2D(Interactor->GetActorLocation(), BoxCenter);
-	if (Dist > MaxPushDistance)
+	FVector ClosestPoint;
+	if (GroundDetectorBox)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("밀기 실패: 거리가 너무 멉니다 (현재: %f, 최대: %f)"), Dist, MaxPushDistance);
+		GroundDetectorBox->GetClosestPointOnCollision(Interactor->GetActorLocation(), ClosestPoint);
+	}
+	else
+	{
+		ClosestPoint = GetActorLocation();
+	}
+	float Dist2D = FVector::Dist2D(Interactor->GetActorLocation(), ClosestPoint);
+	if (Dist2D > MaxPushDistance)
+	{
 		return;
 	}
 
-	// F키 상호작용 시 밀기(Push) 모드로 진입
-	// 밀기 모드 진입 시
 	if (AMainCharacter* MainChar = Cast<AMainCharacter>(Interactor))
 	{
 		MainChar->StartPushMode(this);
+	}
+}
+
+void AEventObjectBase::UpdatePushersWeight()
+
+{
+	if (ItemWeight <= 0.0f || !HasAuthority())
+	{
+		return;
+	}
+
+	float WeightPerPusher = CurrentPushers.Num() > 0 ? (ItemWeight / CurrentPushers.Num()) : 0.0f;
+
+	for (AMainCharacter* Pusher : CurrentPushers)
+	{
+		if (Pusher && Pusher->BaseAttribute)
+		{
+			UBaseAttributeSet* AttrSet = Pusher->BaseAttribute;
+
+			// 기존에 분배된 무게가 있다면 일단 차감 (재분배를 위함)
+			if (AppliedWeightMap.Contains(Pusher))
+			{
+				AttrSet->SetCurrentWeight(FMath::Max(0.0f, AttrSet->GetCurrentWeight() - AppliedWeightMap[Pusher]));
+			}
+
+			// 새로운 N분의 1 무게 부여
+			AttrSet->SetCurrentWeight(AttrSet->GetCurrentWeight() + WeightPerPusher);
+			AppliedWeightMap.Add(Pusher, WeightPerPusher);
+
+			// 캐릭터 이동속도 및 과적 상태 즉시 갱신
+			Pusher->UpdateCharacterSpeed();
+		}
 	}
 }
 
@@ -152,7 +432,15 @@ void AEventObjectBase::AddPusher(AMainCharacter* Pusher)
 {
 	if (HasAuthority() && Pusher && !CurrentPushers.Contains(Pusher))
 	{
+		// 첫 번째 푸셔가 진입할 때 물리 시뮬레이션을 끄고 키네마틱(스크립트 이동) 모드로 전환
+		if (CurrentPushers.Num() == 0)
+		{
+			SetPhysicsSimulateEnabled(false);
+		}
+
 		CurrentPushers.Add(Pusher);
+		PusherLocalAnchorMap.Add(Pusher, GetActorTransform().InverseTransformPosition(Pusher->GetActorLocation()));
+		UpdatePushersWeight();
 	}
 }
 
@@ -160,7 +448,25 @@ void AEventObjectBase::RemovePusher(AMainCharacter* Pusher)
 {
 	if (HasAuthority() && Pusher && CurrentPushers.Contains(Pusher))
 	{
+		if (AppliedWeightMap.Contains(Pusher))
+		{
+			if (Pusher->BaseAttribute)
+			{
+				Pusher->BaseAttribute->SetCurrentWeight(FMath::Max(0.0f, Pusher->BaseAttribute->GetCurrentWeight() - AppliedWeightMap[Pusher]));
+				Pusher->UpdateCharacterSpeed();
+			}
+			AppliedWeightMap.Remove(Pusher);
+		}
+
+		PusherLocalAnchorMap.Remove(Pusher);
 		CurrentPushers.Remove(Pusher);
+		UpdatePushersWeight();
+
+		// 모든 푸셔가 이탈했을 때 다시 엔진 순수 물리 시뮬레이션(중력) 모드로 복귀
+		if (CurrentPushers.Num() == 0)
+		{
+			SetPhysicsSimulateEnabled(true);
+		}
 	}
 }
 
@@ -171,12 +477,50 @@ bool AEventObjectBase::IsReadyToMove() const
 		return false;
 	}
 
-	if (RequiredPushers <= 1)
+	// [대향/마주보고 밀기 충돌 검사] 두 명 이상의 활성 푸셔가 서로 마주보고 밀 경우 힘겨루기 상태로 이동 불가 (정지)
+	if (CurrentPushers.Num() >= 2)
 	{
-		return true;
+		for (int32 i = 0; i < CurrentPushers.Num(); ++i)
+		{
+			AMainCharacter* PusherA = CurrentPushers[i];
+			if (!PusherA || FMath::Abs(PusherA->GetCurrentPushInput()) < 0.1f) continue;
+
+			FVector DirA = PusherA->LockedPushDirection * FMath::Sign(PusherA->GetCurrentPushInput());
+			DirA.Z = 0.0f;
+			DirA.Normalize();
+
+			for (int32 j = i + 1; j < CurrentPushers.Num(); ++j)
+			{
+				AMainCharacter* PusherB = CurrentPushers[j];
+				if (!PusherB || FMath::Abs(PusherB->GetCurrentPushInput()) < 0.1f) continue;
+
+				FVector DirB = PusherB->LockedPushDirection * FMath::Sign(PusherB->GetCurrentPushInput());
+				DirB.Z = 0.0f;
+				DirB.Normalize();
+
+				// 두 힘의 방향이 120도 이상 마주보거나 상반되면(Dot < -0.5f) 힘겨루기로 정지
+				if (FVector::DotProduct(DirA, DirB) < -0.5f)
+				{
+					return false;
+				}
+			}
+		}
 	}
 
-	// 2인 이상 협동 오브젝트: 필요한 인원수만큼 모두 같은 방향으로 밀거나 당기고 있는지 확인
+	// 1인 상자: 적어도 1명 이상의 푸셔가 W(+1.0) 또는 S(-1.0) 입력을 주고 있으면 이동 가능
+	if (RequiredPushers <= 1)
+	{
+		for (const TObjectPtr<AMainCharacter>& Pusher : CurrentPushers)
+		{
+			if (Pusher && FMath::Abs(Pusher->GetCurrentPushInput()) > 0.1f)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// 2인 이상 필수 협동 상자: 최소 RequiredPushers 수만큼의 인원이 모두 동일한 방향으로 입력을 줘야 이동 가능
 	float CommonSign = 0.0f;
 	int32 ActivePusherCount = 0;
 
@@ -212,24 +556,25 @@ void AEventObjectBase::MulticastFallOffLedge_Implementation()
 
 void AEventObjectBase::FallOffLedge()
 {
-	// 상자를 밀던 모든 플레이어의 밀기 모드 강제 해제
-	// StopPushMode가 내부적으로 RemovePusher를 호출하여 배열을 수정하므로, 복사본을 만들어 순회하여 크래시 방지
+	// 상자를 밀던 모든 플레이어의 무게 회수 및 밀기 모드 강제 해제
 	TArray<TObjectPtr<AMainCharacter>> PushersCopy = CurrentPushers;
 	for (AMainCharacter* Pusher : PushersCopy)
 	{
 		if (Pusher)
 		{
+			if (AppliedWeightMap.Contains(Pusher) && Pusher->BaseAttribute)
+			{
+				Pusher->BaseAttribute->SetCurrentWeight(FMath::Max(0.0f, Pusher->BaseAttribute->GetCurrentWeight() - AppliedWeightMap[Pusher]));
+				Pusher->UpdateCharacterSpeed();
+			}
 			Pusher->StopPushMode();
 		}
 	}
 	CurrentPushers.Empty();
+	AppliedWeightMap.Empty();
+	PusherLocalAnchorMap.Empty();
 
-	// 물리 시뮬레이션을 다시 켜서 바닥으로 추락하도록 만듦
-	if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(GetRootComponent()))
-	{
-		PrimComp->SetSimulatePhysics(true);
-	}
-
-	bIsFallingFromLedge = true;
-	FallTimer = 0.5f; // 떨어지는 초기에는 속도가 낮을 수 있으므로 0.5초 유예
+	// 물리 시뮬레이션을 다시 켜서 바닥/낭떠러지로 자연스럽게 추락/낙하/미끄러지도록 처리
+	SetPhysicsSimulateEnabled(true);
 }
+

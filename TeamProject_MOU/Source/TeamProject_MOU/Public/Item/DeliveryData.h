@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Base/ItemBase.h"
+#include "Item/ItemSaveData.h"
 #include "DeliveryData.generated.h"
 
 // 창고에 저장된 아이템 한 종류와 수량을 표현하는 데이터입니다.
@@ -29,9 +30,21 @@ struct FDeliveryData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Delivery")
 	TArray<FStoredItemData> SelectedItems;
 
+	// 플레이어가 이번 배달에 선택한 아이템의 개별 상태 목록입니다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Delivery")
+	TArray<FStoredItemInstanceData> SelectedItemInstances;
+
 	// 유효한 배달 아이템이 하나라도 있는지 확인합니다.
 	bool IsEmpty() const
 	{
+		for (const FStoredItemInstanceData& ItemInstance : SelectedItemInstances)
+		{
+			if (ItemInstance.IsValid())
+			{
+				return false;
+			}
+		}
+
 		for (const FStoredItemData& Item : SelectedItems)
 		{
 			if (Item.ItemClass && Item.Quantity > 0)

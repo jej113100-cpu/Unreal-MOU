@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Base/ItemBase.h"
 #include "Interfaces/PushableInterface.h"
+#include "Traps/Interfaces/TrapTargetInterface.h"
 #include "PackageBase.generated.h"
 
 UENUM(BlueprintType)
@@ -17,7 +18,7 @@ enum class EPackageType : uint8
 };
 
 UCLASS()
-class TEAMPROJECT_MOU_API APackageBase : public AItemBase, public IPushableInterface
+class TEAMPROJECT_MOU_API APackageBase : public AItemBase, public IPushableInterface, public ITrapTargetInterface
 {
 	GENERATED_BODY()
 	
@@ -64,9 +65,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<class USceneComponent> Handle_Back;
 
-	// 들고 있을 때 택배가 세로로 눕도록 회전을 보정하는 변수 (블루프린트에서 조절 가능)
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
-	FRotator CarryRotationOffset = FRotator(0.0f, 90.0f, 0.0f);
+	// [1인 운반 전용 회전 보정] 1인 들기 및 1인 드래그 시 메쉬 방향을 보정하는 회전값 (2인 협동 운반에는 영향을 주지 않음)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Package|Transform")
+	FRotator SingleCarryRotationOffset = FRotator::ZeroRotator;
 
 	// ---------------------------------------------------------
 	// [협동 운반 데이터]
@@ -95,9 +96,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Package|Coop")
 	float CurrentSpeedRatio = 1.0f;
 
-	// 운반자들이 택배 중심점으로부터 떨어질 수 있는 최대 허용 거리 (초과 시 자동 Drop)
+	// 운반자들이 택배 손잡이/소켓 위치로부터 떨어질 수 있는 최대 허용 거리 (80cm 초과 시 자동 Drop 및 1인 들기 복귀)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
-	float MaxCarryDistance = 250.0f;
+	float MaxCarryDistance = 80.0f;
 
 	// [2인 협동] 두 번째 운반자 손 소켓 이름 (공통 CarrySocket 사용 가능)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
@@ -110,6 +111,8 @@ public:
 	// [무거운 택배 전용] Handle_Front와 Handle_Back 사이의 거리 (메시에 맞게 조절)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Package|Coop")
 	float HandleLength = 100.0f;
+
+	virtual bool CanBePickedUpBy(AActor* PotentialPicker) const override;
 
 
 protected:
@@ -160,6 +163,10 @@ public:
 	// 택배는 F키 상호작용 대상이 아니며, 오직 E키로만 잡고/들고/던집니다.
 	virtual bool CanInteract_Implementation(AActor* Interactor) const override;
 
+	// ItemBase 공통 저장 데이터에 택배 전용 상태를 추가합니다.
+	virtual void SaveItemToData_Implementation(FStoredItemInstanceData& OutData) const override;
+	virtual void LoadItemFromData_Implementation(const FStoredItemInstanceData& InData) override;
+
 	// [클라이언트 동기화] 물리 콜리전 상태 동기화를 위해 오버라이드
 	virtual void MulticastPickUp_Implementation(AActor* Picker) override;
 	virtual void MulticastDrop_Implementation(FVector DropLocation, AActor* Dropper = nullptr) override;
@@ -169,4 +176,14 @@ public:
 	// ---------------------------------------------------------
 	virtual float GetPushResistance_Implementation() const override;
 	virtual void Push_Implementation(AActor* Pusher, FVector PushDirection) override;
+
+	// ---------------------------------------------------------
+	// [함정 타겟 인터페이스 구현 (ITrapTargetInterface)]
+	// ---------------------------------------------------------
+	virtual void ApplyTrapDamage_Implementation(float DamageAmount, AActor* Causer) override;
+	virtual void ApplyTrapStatusEffect_Implementation(TSubclassOf<UGameplayEffect> EffectClass, AActor* Causer) override;
+	virtual void ApplyTrapImpulse_Implementation(FVector ImpulseVector) override;
+	virtual void ForceDropCarriedItem_Implementation() override;
+	virtual void DrainBattery_Implementation(float DrainAmount) override;
+	virtual void OnTrapHazardEncountered_Implementation(ETrapHazardType HazardType, AActor* TrapActor) override;
 };

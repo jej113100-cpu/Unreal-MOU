@@ -8,6 +8,8 @@
 #include "GameFramework/Character.h"
 #include "GameplayAbilitySpecHandle.h"
 #include "Interfaces/PushableInterface.h"
+#include "Traps/Interfaces/TrapTargetInterface.h"
+#include "Components/CharacterVisualComponent.h"
 #include "CharacterBase.generated.h"
 
 class AController;
@@ -24,7 +26,7 @@ struct FOnAttributeChangeData;
  * GAS(Gameplay Ability System) 및 공통 상태 관리(StatusComponent)를 내장합니다.
  */
 UCLASS()
-class TEAMPROJECT_MOU_API ACharacterBase : public ATeamProject_MOUCharacter, public IAbilitySystemInterface, public IPushableInterface, public IGameplayTagAssetInterface
+class TEAMPROJECT_MOU_API ACharacterBase : public ATeamProject_MOUCharacter, public IAbilitySystemInterface, public IPushableInterface, public IGameplayTagAssetInterface, public ITrapTargetInterface
 {
 	GENERATED_BODY()
 
@@ -51,6 +53,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Character|Attributes")
 	float DefaultMaxWeight = 100.0f;
 
+	// 포션 등으로 인한 이동속도 가감 수치 (신속=+150, 슬로우=-100, 기본 0).
+	// GetCalculatedWalkSpeed 결과에 더해진다. 포션이 이 값을 +=/-= 로 조절하고 지속시간 후 원복한다.
+	UPROPERTY(BlueprintReadWrite, Category = "Attributes|Movement")
+	float SpeedBuffFlat = 0.0f;
+
 	// 상태 이상 및 디버프 관리 컴포넌트 (플레이어 및 NPC 공통 사용)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
 	TObjectPtr<UStatusComponent> StatusComponent;
@@ -58,6 +65,10 @@ public:
 	// 잡힌 캐릭터가 운반자의 소켓 위치를 따라가도록 관리하는 컴포넌트
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grab")
 	TObjectPtr<UGrabFollowComponent> GrabFollowComponent;
+
+	// 표정 MI 및 LED 발광 색상/강도를 상태 우선순위에 따라 관리하는 비주얼 컴포넌트
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Visual")
+	TObjectPtr<class UCharacterVisualComponent> VisualComponent;
 
 	// 캐릭터 생성 시 기본 부여할 Gameplay Ability 스킬 배열
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "GASGamePlayAbility")
@@ -74,6 +85,10 @@ public:
 	// 캐릭터가 현재 행동(공격, 상호작용, 스킬) 가능한 상태인지 확인
 	UFUNCTION(BlueprintCallable, Category = "Status")
 	virtual bool CanAct() const;
+
+	// 비주얼 제어 컴포넌트 반환
+	UFUNCTION(BlueprintPure, Category = "Visual")
+	class UCharacterVisualComponent* GetVisualComponent() const { return VisualComponent; }
 
 	// ---------------------------------------------------------
 	// [Blueprint 이벤트] - UI 및 연출 업데이트용 델리게이트 알림
@@ -137,6 +152,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Attributes|Movement")
 	float GetCalculatedWalkSpeed() const;
 
+	// 현재 과적, 운반, 달리기 상태 등을 종합하여 실제 이동 속도를 재계산하고 MoveSpeed 속성 및 CharacterMovement에 적용
+	UFUNCTION(BlueprintCallable, Category = "Attributes|Movement")
+	void UpdateCharacterSpeed();
+
 	// 과적(Encumbrance) 상태 업데이트 및 이동속도/상태 디버프 적용
 	UFUNCTION(BlueprintCallable, Category = "Status|Encumbrance")
 	void UpdateEncumbranceState(float InCurrentWeight, float InMaxWeight);
@@ -187,4 +206,14 @@ public:
 	// ---------------------------------------------------------
 	virtual float GetPushResistance_Implementation() const override;
 	virtual void Push_Implementation(AActor* Pusher, FVector PushDirection) override;
+
+	// ---------------------------------------------------------
+	// [함정 타겟 인터페이스 구현 (ITrapTargetInterface)]
+	// ---------------------------------------------------------
+	virtual void ApplyTrapDamage_Implementation(float DamageAmount, AActor* Causer) override;
+	virtual void ApplyTrapStatusEffect_Implementation(TSubclassOf<UGameplayEffect> EffectClass, AActor* Causer) override;
+	virtual void ApplyTrapImpulse_Implementation(FVector ImpulseVector) override;
+	virtual void ForceDropCarriedItem_Implementation() override;
+	virtual void DrainBattery_Implementation(float DrainAmount) override;
+	virtual void OnTrapHazardEncountered_Implementation(ETrapHazardType HazardType, AActor* TrapActor) override;
 };

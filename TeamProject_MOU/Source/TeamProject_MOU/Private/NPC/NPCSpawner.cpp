@@ -292,3 +292,4 @@ void ANPCSpawner::AssignPatrolActors(
 			SpawnedNPC, SpawnDefinition.PatrolBoundActor.Get());
 	}
 }
+

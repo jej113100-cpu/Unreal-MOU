@@ -14,6 +14,7 @@ UGA_Revive::UGA_Revive()
 		FGameplayTagContainer AssetTagsContainer;
 		AssetTagsContainer.AddTag(ReviveTag);
 		SetAssetTags(AssetTagsContainer);
+		ActivationOwnedTags.AddTag(ReviveTag);
 	}
 
 	FGameplayTag SprintTag = FGameplayTag::RequestGameplayTag(FName("Ability.Player.Sprint"), false);

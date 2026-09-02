@@ -34,6 +34,7 @@ void AWeaponItemBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	// 내구도(CurrentDurability)는 ItemBase에서 이미 복제하므로 여기서 별도 등록하지 않는다.
+	DOREPLIFETIME(AWeaponItemBase, bIsInUse);
 }
 
 // [WEAPON-010] 집을 때 소유권 설정 (클라 → 서버 RPC 가능하게)
@@ -106,7 +107,46 @@ void AWeaponItemBase::TryFireOnServer()
 		CurrentDurability -= GetDurabilityCostPerUse();
 	}
 
+	// 동작이 이어지는 무기(그래버 등)는 사용 중 상태 진입 → 슬롯 변경 차단. [WEAPON-015]
+	if (bUsesInUseState())
+	{
+		bIsInUse = true;
+	}
+
 	Fire();
+}
+
+// [WEAPON-017] 사용 완료 (서버): 자식이 동작 끝나는 시점에 호출 → 슬롯 변경 다시 허용
+void AWeaponItemBase::FinishUse()
+{
+	if (HasAuthority())
+	{
+		bIsInUse = false;
+	}
+}
+
+// [WEAPON-018] 이 무기를 현재 든 Pawn을 반환 (LastOwner 유실 대비 attach 부모 폴백)
+APawn* AWeaponItemBase::GetOwningPawn() const
+{
+	// 1순위: LastOwner가 살아있고 Pawn이면 그대로 사용
+	if (APawn* OwnerPawn = Cast<APawn>(LastOwner))
+	{
+		return OwnerPawn;
+	}
+
+	// 2순위: 레벨 이동 등으로 LastOwner가 유실됐으면, 손에 attach된 부모 액터 체인에서 Pawn을 찾는다.
+	//   (무기는 든 플레이어의 메시에 attach되어 있으므로 부모를 타고 올라가면 Pawn이 나온다)
+	AActor* Parent = GetAttachParentActor();
+	while (Parent)
+	{
+		if (APawn* ParentPawn = Cast<APawn>(Parent))
+		{
+			return ParentPawn;
+		}
+		Parent = Parent->GetAttachParentActor();
+	}
+
+	return nullptr;
 }
 
 // [WEAPON-007] 실제 발사 로직 (기본 빈 구현, 자식이 override)

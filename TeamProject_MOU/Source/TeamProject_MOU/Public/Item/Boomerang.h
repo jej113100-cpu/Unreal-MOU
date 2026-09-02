@@ -120,6 +120,9 @@ protected:
 	// 따라서 부모의 발사 시점 차감은 끄고(false), ApplyWeaponHit에서 직접 차감한다. [WEAPON-013]
 	virtual bool ShouldConsumeUseOnFire() const override { return false; }
 
+	// 부메랑은 비행 중(던져서 손에 돌아올 때까지) "사용 중"이라 슬롯 변경을 막는다. [WEAPON-015]
+	virtual bool bUsesInUseState() const override { return true; }
+
 	// [BOOMERANG-001] 무기 공통 히트 override: 맞은 캐릭터에 상태이상 부여 + 내구도 차감 + 즉시 되돌아오기 전환
 	virtual void ApplyWeaponHit_Implementation(AActor* HitActor, const FHitResult& Hit) override;
 #pragma endregion

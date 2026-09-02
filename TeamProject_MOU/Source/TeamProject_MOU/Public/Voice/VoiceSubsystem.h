@@ -177,6 +177,17 @@ public:
 	bool IsRadioTransmitting() const { return bRadioTransmitting; }
 
 	/**
+	 * 지금 무전을 **받고** 있는가. UI 의 "수신 중" 아이콘이 이걸 쓴다.
+	 *
+	 * ★ 위 IsRadioTransmitting 과 짝이다. 송신은 내가 정하는 값이라 여기에
+	 *   플래그로 들고 있지만, 수신은 판단 근거가 재생 쪽에 있어서
+	 *   UVoicePlaybackComponent::IsReceivingRadio 로 넘긴다. UI 가 두 군데를
+	 *   찾아다니지 않게 창구만 여기로 통일한다(위젯은 이미 서브시스템을 안다).
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	bool IsReceivingRadio() const;
+
+	/**
 	 * 사망 상태를 서버에 요청한다(테스트용, `MOU.Voice.Die` / `MOU.Voice.Revive`).
 	 *
 	 * ★ 나중에 실제 게임 로직(체력 0 -> 사망)과 엮이면 이 함수는 사라진다.
@@ -193,11 +204,41 @@ public:
 	bool IsSpeaking() const { return bIsSpeaking; }
 
 	/**
-	 * 마지막 프레임의 음량(0~1).
-	 * 옵션 화면의 입력 게이지가 이 값을 그린다(V9).
+	 * 마지막 프레임의 **순간** 음량(0~1).
+	 * 옵션 화면의 입력 게이지가 이 값을 그린다(V9) - 게이지는 반응이 빨라야 한다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
 	float GetCurrentLoudness() const;
+
+	/**
+	 * 스무딩을 통과한 음량(0~1). **반경 계산 쪽이 쓰는 값이다.**
+	 *
+	 * 게이지에는 GetCurrentLoudness 를 쓴다. 이쪽은 하강이 느려서(0.25초)
+	 * 게이지로 쓰면 말을 멈춘 뒤에도 한동안 차 있는 것처럼 보인다.
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	float GetLoudnessEnvelope() const;
+
+	/**
+	 * 지금 발화의 **정규화된 강도**(0~1). 네트워크로 나가는 값과 같은 의미다.
+	 *
+	 * ★ 정규화 공식이 나오는 곳을 하나로 묶기 위한 함수다.
+	 *   엔벨로프와 내 마이크 감도를 조합하는 계산이 여러 곳에 흩어져 있으면,
+	 *   한 곳만 고쳤을 때 **화면의 원과 남에게 들리는 거리가 조용히 어긋난다.**
+	 *   전송 경로만은 "그 프레임의" 엔벨로프를 써야 해서 예외인데, 그쪽도
+	 *   MOUVoice::NormalizeLoudness 라는 같은 함수를 부른다.
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	float GetCurrentIntensity() const;
+
+	/**
+	 * 지금 이 발화가 반경에 적용되는 배율(MinRadiusScale ~ 1.0).
+	 *
+	 * 디버그 표시와 UI 가 쓴다. 전송되는 값과 **같은 경로**로 계산한다 -
+	 * 따로 계산하면 화면의 원과 실제 판정이 어긋난다(VoiceTypes.h).
+	 */
+	UFUNCTION(BlueprintPure, Category = "MOU|Voice")
+	float GetCurrentRadiusScale() const;
 
 	/**
 	 * 마이크 감도(VAD 임계값)를 바꾼다. 낮출수록 작은 소리도 발화로 친다.

@@ -5,6 +5,7 @@
 #include "AbilitySystemComponent.h"
 #include "Animation/AnimMontage.h"
 #include "Base/ItemBase.h"
+#include "TeamProject_MOUGameMode.h"
 
 UGA_Death::UGA_Death()
 {
@@ -88,5 +89,10 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle, const F
 
 		// 사망 표정 변경 및 이벤트 방송
 		MainChar->MulticastOnDeath();
+		if (ATeamProject_MOUGameMode* GameMode = MainChar->GetWorld()->GetAuthGameMode<ATeamProject_MOUGameMode>())
+		{
+			GameMode->NotifyPlayerDeath();
+		}
 	}
 }
+

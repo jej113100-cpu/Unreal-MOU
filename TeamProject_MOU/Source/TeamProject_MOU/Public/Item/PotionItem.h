@@ -56,6 +56,15 @@ protected:
 	// 비워두면(None) 아무 이벤트도 보내지 않는다. (정석 방식: 태그 직접 부여 대신 이 이벤트 사용)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Potion", meta = (Categories = "Event"))
 	FGameplayTag StatusEventTag;
+
+	// 이동속도 가감 수치 (신속=+150, 슬로우=-100). 0이면 이동속도 효과 미사용.
+	// GE로 MoveSpeed를 직접 바꾸면 UpdateCharacterSpeed가 덮어쓰므로, CharacterBase의 SpeedBuffFlat에 가감한다.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Potion|Speed")
+	float SpeedFlatDelta = 0.0f;
+
+	// 이동속도 가감 지속시간(초). 0 이하면 영구(원복 안 함).
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Potion|Speed")
+	float SpeedBuffDuration = 5.0f;
 #pragma endregion
 
 #pragma region [POTION] 투척 설정값
@@ -74,6 +83,10 @@ protected:
 
 	// [POTION-002] 투척형: 던지면 충돌 감지 준비 (부모 물리 투척 후 OnComponentHit 바인딩)
 	virtual void Throw_Implementation(FVector ThrowVelocity, AActor* Thrower = nullptr) override;
+
+	// [POTION-004] 좌클릭 사용: bApplyOnImpact가 켜져 있으면 던진다(충돌 시 발동),
+	// 꺼져 있으면 제자리에서 마신다. Q(단순 투척)와 구분하려고 좌클릭 경로에서만 발동 플래그를 세운다.
+	virtual void OnUse_Implementation() override;
 #pragma endregion
 
 private:
@@ -88,5 +101,9 @@ private:
 
 	// 중복 발동 방지 (OnComponentHit이 여러 번 불릴 수 있음)
 	bool bHasImpacted = false;
+
+	// 이번 던지기가 좌클릭 "사용" 발(發)인지 여부. true일 때만 충돌 발동(터짐).
+	// Q(단순 투척)는 이 플래그가 false라 어떤 포션이든 절대 안 터진다.
+	bool bThrowAsUse = false;
 #pragma endregion
 };

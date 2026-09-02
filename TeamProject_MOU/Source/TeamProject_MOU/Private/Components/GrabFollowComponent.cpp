@@ -64,6 +64,12 @@ void UGrabFollowComponent::StopGrabFollow()
 		return;
 	}
 
+	if (ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()))
+	{
+		FRotator CurrentRot = OwnerCharacter->GetActorRotation();
+		OwnerCharacter->SetActorRotation(FRotator(0.0f, CurrentRot.Yaw, 0.0f));
+	}
+
 	CarrierCharacter = nullptr;
 	ApplyHeldTag(false);
 	RestoreGrabbedMovement();

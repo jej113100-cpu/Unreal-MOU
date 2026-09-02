@@ -104,3 +104,4 @@ private:
 	bool IsSpawnPointOccupied(const USceneComponent* SpawnPoint) const;
 	void AssignPatrolActors(ACharacterBase* SpawnedNPC, const FNPCSpawnDefinition& SpawnDefinition) const;
 };
+

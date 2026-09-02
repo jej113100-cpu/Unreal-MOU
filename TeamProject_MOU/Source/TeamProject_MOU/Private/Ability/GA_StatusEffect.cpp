@@ -2,6 +2,7 @@
 #include "Base/CharacterBase.h"
 #include "Base/BaseAttributeSet.h"
 #include "Components/StatusComponent.h"
+#include "Components/CarryingComponent.h"
 #include "AbilitySystemComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Animation/AnimMontage.h"
@@ -73,6 +74,18 @@ void UGA_StatusEffect::ActivateAbility(const FGameplayAbilitySpecHandle Handle, 
 		ASC->AddLooseGameplayTag(AppliedStatusTag);
 	}
 
+	// 감전, 스턴, 넉다운 상태이상 시 들고 있던 물건 즉시 드랍
+	if (EffectType == EStatusEffectType::ElectricShock || EffectType == EStatusEffectType::Stun || EffectType == EStatusEffectType::Knockdown)
+	{
+		if (UCarryingComponent* CarryingComp = Char ? Char->FindComponentByClass<UCarryingComponent>() : nullptr)
+		{
+			if (CarryingComp->IsCarrying())
+			{
+				CarryingComp->GrabOrDrop();
+			}
+		}
+	}
+
 	if (EffectType == EStatusEffectType::Slow)
 	{
 		if (UBaseAttributeSet* Attr = GetBaseAttributeSet())
@@ -127,7 +140,13 @@ void UGA_StatusEffect::EndAbility(const FGameplayAbilitySpecHandle Handle, const
 		{
 			if (HasAuthority(&ActivationInfo))
 			{
-				Attr->SetMoveSpeed(PreviousWalkSpeed);
+				ACharacterBase* Char = GetCharacterFromActorInfo();
+				float RestoredSpeed = Char ? Char->GetCalculatedWalkSpeed() : PreviousWalkSpeed;
+				Attr->SetMoveSpeed(RestoredSpeed);
+				if (Char && Char->GetCharacterMovement())
+				{
+					Char->GetCharacterMovement()->MaxWalkSpeed = RestoredSpeed;
+				}
 			}
 		}
 	}

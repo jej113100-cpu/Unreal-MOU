@@ -85,6 +85,30 @@ protected:
 	// ShouldConsumeUseOnFire()가 true일 때만 TryFireOnServer에서 이 값만큼 차감한다.
 	virtual float GetDurabilityCostPerUse() const { return 1.0f; }
 
+	// [WEAPON-015] 이 무기가 발사 시 "사용 중" 상태를 유지하는지.
+	//   기본 false(즉발 무기는 사용 중이 없음). 그래버처럼 동작이 이어지는 무기는 true로 override.
+	//   true면 OnUse에서 bIsInUse=true가 되고, 자식이 FinishUse()로 끝을 알린다.
+	virtual bool bUsesInUseState() const { return false; }
+
+public:
+	// [WEAPON-016] 지금 이 무기를 사용 중인지 (사용 중엔 슬롯 변경 차단용). 복제됨.
+	//   MainCharacter가 슬롯 변경 전에 조회하므로 public.
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsInUse() const { return bIsInUse; }
+
+	// [WEAPON-018] 이 무기를 현재 든 Pawn을 반환.
+	//   LastOwner가 유효하면 그걸, 아니면(레벨 이동 등으로 유실 시) attach된 부모 액터에서 찾는다.
+	//   발사 시 조준 소스(컨트롤러 시점)를 안정적으로 얻기 위함.
+	APawn* GetOwningPawn() const;
+
+protected:
+	// [WEAPON-017] 사용 완료 알림 (서버). 자식이 동작이 끝나는 시점에 호출 → bIsInUse=false.
+	void FinishUse();
+
+	// 사용 중 상태 (서버가 갱신, 모든 클라 복제). 슬롯 변경 차단 판정에 쓰인다.
+	UPROPERTY(Replicated)
+	bool bIsInUse = false;
+
 private:
 	// [WEAPON-008] 클라이언트에서 눌렀을 때 서버로 발사 위임 (서버에서 차감+발사)
 	UFUNCTION(Server, Reliable)

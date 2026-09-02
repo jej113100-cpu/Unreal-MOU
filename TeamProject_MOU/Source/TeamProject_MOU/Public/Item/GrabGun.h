@@ -169,6 +169,9 @@ protected:
 	//   토글이라 발사 시점 자동차감을 끄고, 실제 잡기 성공 시에만 서버에서 수동 차감한다.
 	virtual bool ShouldConsumeUseOnFire() const override { return false; }
 
+	// 그래버는 뻗기~당기기 시퀀스 동안 "사용 중"이라 슬롯 변경을 막는다. [WEAPON-015]
+	virtual bool bUsesInUseState() const override { return true; }
+
 	// [GRAB-003] 무기 공통 히트 처리 override: 맞은 캐릭터를 GrabFollowComponent로 집기
 	virtual void ApplyWeaponHit_Implementation(AActor* HitActor, const FHitResult& Hit) override;
 #pragma endregion

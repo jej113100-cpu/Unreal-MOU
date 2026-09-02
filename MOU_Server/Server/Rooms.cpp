@@ -392,6 +392,20 @@ uint32_t FindRoomOf(uint64_t UserId)
 	return R ? R->RoomId : 0;
 }
 
+bool GetRoomStateOf(uint64_t UserId, ERoomState& OutState)
+{
+	std::lock_guard<std::mutex> Lock(GMutex);
+	const Room* R = FindRoomOfMember(UserId);
+
+	if (R == nullptr)
+	{
+		return false;
+	}
+
+	OutState = R->State;
+	return true;
+}
+
 void ListWaiting(std::vector<RoomInfo>& Out, size_t MaxCount)
 {
 	std::lock_guard<std::mutex> Lock(GMutex);

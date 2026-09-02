@@ -67,7 +67,8 @@ void ABoomerang::StartFlight()
 	FVector ViewLocation = GetActorLocation();
 	FRotator ViewRotation = GetActorRotation();
 
-	if (APawn* OwnerPawn = Cast<APawn>(LastOwner))
+	// LastOwner 유실(레벨 이동 등) 대비: attach 부모까지 찾아 현재 든 Pawn을 얻는다. [WEAPON-018]
+	if (APawn* OwnerPawn = GetOwningPawn())
 	{
 		if (OwnerPawn->GetController())
 		{
@@ -75,7 +76,7 @@ void ABoomerang::StartFlight()
 		}
 		else
 		{
-			LastOwner->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+			OwnerPawn->GetActorEyesViewPoint(ViewLocation, ViewRotation);
 		}
 	}
 
@@ -261,6 +262,9 @@ void ABoomerang::CatchByOwner()
 
 	FlightState = EBoomerangState::Idle; // 복제됨
 	ElapsedFlightTime = 0.0f;
+
+	// 손에 돌아왔으니 사용 중 상태 해제 → 슬롯 변경 다시 허용 [WEAPON-017]
+	FinishUse();
 
 	// 비행 콜라이더 끄기
 	EnableMeleeCollision(false);

@@ -88,6 +88,30 @@ void UWarehouseComponent::ClearStoredItems()
 	BroadcastWarehouseChanged();
 }
 
+TArray<FStoredItemInstanceData> UWarehouseComponent::BuildStoredItemInstanceData() const
+{
+	TArray<FStoredItemInstanceData> SavedItemInstances;
+	SavedItemInstances.Reserve(StoredItemInstances.Num());
+
+	for (const TObjectPtr<AItemBase>& ItemInstance : StoredItemInstances)
+	{
+		if (!CanStoreItemInstance(ItemInstance))
+		{
+			continue;
+		}
+
+		FStoredItemInstanceData SavedItemInstance;
+		ItemInstance->SaveItemToData(SavedItemInstance);
+
+		if (SavedItemInstance.IsValid())
+		{
+			SavedItemInstances.Add(SavedItemInstance);
+		}
+	}
+
+	return SavedItemInstances;
+}
+
 bool UWarehouseComponent::HandleActorEnteredWarehouse(AActor* OtherActor)
 {
 	AItemBase* ItemInstance = Cast<AItemBase>(OtherActor);
@@ -142,6 +166,9 @@ bool UWarehouseComponent::LoadStoredItemsFromGameInstance()
 bool UWarehouseComponent::BuildDeliveryData(const TArray<FStoredItemData>& RequestedItems, FDeliveryData& OutDeliveryData) const
 {
 	OutDeliveryData.SelectedItems.Reset();
+	OutDeliveryData.SelectedItemInstances.Reset();
+
+	TSet<int32> UsedInstanceIndices;
 
 	for (const FStoredItemData& RequestedItem : RequestedItems)
 	{
@@ -158,6 +185,36 @@ bool UWarehouseComponent::BuildDeliveryData(const TArray<FStoredItemData>& Reque
 		}
 
 		OutDeliveryData.SelectedItems.Add(RequestedItem);
+
+		int32 AddedInstanceCount = 0;
+		for (int32 InstanceIndex = 0; InstanceIndex < StoredItemInstances.Num() && AddedInstanceCount < RequestedItem.Quantity; ++InstanceIndex)
+		{
+			const AItemBase* StoredItemInstance = StoredItemInstances[InstanceIndex];
+			if (UsedInstanceIndices.Contains(InstanceIndex) || !StoredItemInstance || StoredItemInstance->GetClass() != RequestedItem.ItemClass)
+			{
+				continue;
+			}
+
+			FStoredItemInstanceData SavedItemInstance;
+			StoredItemInstance->SaveItemToData(SavedItemInstance);
+			if (!SavedItemInstance.IsValid())
+			{
+				continue;
+			}
+
+			OutDeliveryData.SelectedItemInstances.Add(SavedItemInstance);
+			UsedInstanceIndices.Add(InstanceIndex);
+			++AddedInstanceCount;
+		}
+
+		// 개별 액터가 없는 요약 데이터만 있는 경우에도 기존 수량 기반 테스트가 유지되도록 기본 데이터를 채웁니다.
+		while (AddedInstanceCount < RequestedItem.Quantity)
+		{
+			FStoredItemInstanceData FallbackItemInstance;
+			FallbackItemInstance.ItemClass = RequestedItem.ItemClass;
+			OutDeliveryData.SelectedItemInstances.Add(FallbackItemInstance);
+			++AddedInstanceCount;
+		}
 	}
 
 	return !OutDeliveryData.IsEmpty();
