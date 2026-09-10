@@ -161,6 +161,22 @@ protected:
 	TObjectPtr<class UInputMappingContext> DrivingMappingContext;
 
 private:
+	UPROPERTY(EditDefaultsOnly, Category = "Vehicle|Drift", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float DriftRearGripScale = 0.45f;
+
+	UPROPERTY(Replicated)
+	bool bDrifting = false;
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetDrifting(bool bEnabled);
+
+	// Current vehicle layout: front wheels 0/1, rear wheels 2/3.
+	TArray<float> DefaultWheelGrip;
+	bool bLocalDriftRequested = false;
+
+	// BP의 엔진 토크를 기준으로 전진 기어에서만 구동력을 높인다.
+	float BaseEngineMaxTorque = 0.0f;
+
 	// 탑승 처리 내부 구현: 좌석 배정 + Attach + 운전석이면 Possess 전환 (서버)
 	void SeatCharacter(ACharacterBase* Character, int32 SeatIndex);
 

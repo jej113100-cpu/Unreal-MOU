@@ -4,6 +4,10 @@
 #include "TeamProject_MOUPlayerController.h"
 #include "ChaosVehicleMovementComponent.h"
 #include "ChaosWheeledVehicleMovementComponent.h"
+#include "ChaosVehicleWheel.h"
+#include "GameFramework/PlayerController.h"
+#include "InputCoreTypes.h"
+#include "PhysicsEngine/PhysicsSettings.h"
 #include "Camera/CameraComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -59,11 +63,22 @@ void AVehicleBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
 	// 좌석 점유 상태를 모든 클라이언트에 복제한다.
 	DOREPLIFETIME(AVehicleBase, Seats);
+	DOREPLIFETIME(AVehicleBase, bDrifting);
 }
 
 void AVehicleBase::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (const UChaosWheeledVehicleMovementComponent* Wheeled = Cast<UChaosWheeledVehicleMovementComponent>(GetVehicleMovementComponent()))
+	{
+		BaseEngineMaxTorque = Wheeled->EngineSetup.MaxTorque;
+		for (const FChaosWheelSetup& Setup : Wheeled->WheelSetups)
+		{
+			const UChaosVehicleWheel* Wheel = Setup.WheelClass ? Setup.WheelClass->GetDefaultObject<UChaosVehicleWheel>() : nullptr;
+			DefaultWheelGrip.Add(Wheel ? Wheel->FrictionForceMultiplier : 1.0f);
+		}
+	}
 
 	// [임시 진단] 무브먼트/메시 물리 연결 상태 확인.
 	USkeletalMeshComponent* MeshComp = GetMesh();
@@ -73,6 +88,15 @@ void AVehicleBase::BeginPlay()
 		(MeshComp && MeshComp->IsSimulatingPhysics()) ? 1 : 0,
 		Movement ? *Movement->GetName() : TEXT("NULL"),
 		(Movement && Movement->UpdatedComponent) ? *Movement->UpdatedComponent->GetName() : TEXT("NULL"));
+
+	// [임시 진단] 비동기 물리 설정이 실제로 켜졌는지 런타임에 직접 확인.
+	// bTickPhysicsAsync 가 0 이면 ini 가 반영 안 된 것(에디터 재시작 필요 or 다른 설정이 덮어씀).
+	if (const UPhysicsSettings* PS = UPhysicsSettings::Get())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[VEHICLE] bTickPhysicsAsync=%d, AsyncFixedTimeStepSize=%.5f"),
+			PS->bTickPhysicsAsync ? 1 : 0,
+			PS->AsyncFixedTimeStepSize);
+	}
 }
 
 // [VEHICLE-002] 좌석 복제 콜백: 클라이언트에서 좌석 변화 연출 훅 호출
@@ -293,6 +317,10 @@ void AVehicleBase::UnseatCharacter(ACharacterBase* Character, int32 SeatIndex)
 
 	FVehicleSeat& Seat = Seats[SeatIndex];
 	const bool bWasDriver = Seat.bIsDriverSeat;
+	if (bWasDriver)
+	{
+		bDrifting = false;
+	}
 
 	// 운전자였다면 조종 입력을 0으로 정리한 뒤 컨트롤러를 캐릭터로 되돌린다.
 	if (bWasDriver && CachedDriverController && CachedDriverCharacter == Character)
@@ -338,17 +366,8 @@ void AVehicleBase::MulticastAttachOccupant_Implementation(ACharacterBase* Charac
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	const FName SocketName = Seats[SeatIndex].SeatSocketName;
 
-	if (MeshComp && SocketName != NAME_None && MeshComp->DoesSocketExist(SocketName))
-	{
-		Character->AttachToComponent(MeshComp, FAttachmentTransformRules::SnapToTargetNotIncludingScale, SocketName);
-	}
-	else
-	{
-		// 소켓 미지정 시 루트에 그냥 붙인다 (에디터 셋업 전 임시).
-		Character->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
-	}
-
-	// 캐릭터 이동/충돌 잠금: 탑승 중 걸어다니거나 물리 충돌하지 않도록.
+	// [임시 진단] 캐릭터 Attach 가 차량 물리를 방해하는지 배제하기 위해,
+	// 지금은 Attach 하지 않고 숨기기만 한다. 이래도 차가 안 굴러가면 캐릭터는 원인이 아니다.
 	if (UCharacterMovementComponent* CharMove = Character->GetCharacterMovement())
 	{
 		CharMove->DisableMovement();
@@ -357,6 +376,7 @@ void AVehicleBase::MulticastAttachOccupant_Implementation(ACharacterBase* Charac
 	{
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
+	Character->SetActorHiddenInGame(true);
 }
 
 // [VEHICLE-051] 모든 머신: 캐릭터 Detach + 이동/충돌 복구 + 안전 위치 이동
@@ -368,6 +388,9 @@ void AVehicleBase::MulticastDetachOccupant_Implementation(ACharacterBase* Charac
 	}
 
 	Character->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+
+	// [임시 진단] 탑승 시 숨겼던 캐릭터를 다시 보이게 한다.
+	Character->SetActorHiddenInGame(false);
 
 	if (UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
 	{
@@ -455,7 +478,7 @@ void AVehicleBase::OnThrottleInput(const FInputActionValue& Value)
 	// 그래서 입력이 들어올 때마다 명시적으로 깨우고 주차를 해제한다.
 	Movement->SetSleeping(false);
 	Movement->SetParked(false);
-	Movement->SetHandbrakeInput(false);
+	Movement->SetHandbrakeInput(bLocalDriftRequested);
 
 	const float Axis = Value.Get<float>();
 
@@ -511,7 +534,43 @@ void AVehicleBase::OnExitInput()
 	}
 }
 
+void AVehicleBase::ServerSetDrifting_Implementation(bool bEnabled)
+{
+	bDrifting = bEnabled && GetDriver() != nullptr;
+}
+
 void AVehicleBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	if (UChaosWheeledVehicleMovementComponent* Wheeled = Cast<UChaosWheeledVehicleMovementComponent>(GetVehicleMovementComponent()))
+	{
+		if (IsLocallyControlled())
+		{
+			const APlayerController* PC = Cast<APlayerController>(GetController());
+			const bool bRequested = PC && PC->IsInputKeyDown(EKeys::SpaceBar)
+				&& GetDriver() && Wheeled->GetForwardSpeed() > 300.0f;
+			if (bRequested != bLocalDriftRequested)
+			{
+				bLocalDriftRequested = bRequested;
+				ServerSetDrifting(bRequested);
+			}
+			Wheeled->SetHandbrakeInput(bRequested);
+		}
+		else
+		{
+			bLocalDriftRequested = false;
+		}
+
+		const bool bApplyDrift = IsLocallyControlled() ? bLocalDriftRequested : bDrifting;
+		for (int32 Index = 2; Index < FMath::Min(4, Wheeled->Wheels.Num()); ++Index)
+		{
+			if (DefaultWheelGrip.IsValidIndex(Index))
+			{
+				Wheeled->SetWheelFrictionMultiplier(Index, DefaultWheelGrip[Index] * (bApplyDrift ? DriftRearGripScale : 1.0f));
+			}
+		}
+		const float TorqueMultiplier = Wheeled->GetCurrentGear() > 0 ? 1.8f : 1.0f;
+		Wheeled->SetMaxEngineTorque(BaseEngineMaxTorque * TorqueMultiplier);
+	}
 }
