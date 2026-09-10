@@ -1,0 +1,34 @@
+Edit the attached Korean warning texture atlas into exactly 2048x2048 PNG. Rebuild the layout as EXACTLY 32 horizontal strips of EXACTLY 64px each. Black #000 background white #fff lettering. No grid lines, no labels, no border, no perspective. This is a precision game texture, not a poster. Use identical heavy Korean sans serif font size for ALL phrases, fixed glyph visible height 48px, top and bottom padding 8px per strip, identical baseline offset in every strip. Never scale font per row. Each strip has one or two phrases, horizontally centered as a complete group. Uniform spacing of 64px between phrase groups. >>>> is four heavy chevrons exactly the same 48px visible height as the text and on same vertical alignment. All 32 strips extend edge to edge, no outer vertical margin, first glyph top y8 last glyph bottom y2040. Do not retain original 22-row layout. Exact 32 row content assignment follows, numbers are instructions only and MUST NOT appear:
+01 관계자외 출입금지 >>>>
+02 출입통제구역    무단출입금지 >>>>
+03 지게차 통행주의 >>>>
+04 차량 통행주의    서행 >>>>
+05 적재구역    하역구역 >>>>
+06 중량물 주의 >>>>
+07 최대 적재하중 >>>>
+08 적재금지 >>>>
+09 출입구 앞 적재금지 >>>>
+10 비상구 앞 적재금지 >>>>
+11 적재높이 제한 >>>>
+12 이중 적재 금지    파손 주의 >>>>
+13 입고구역    출고구역 >>>>
+14 검수구역 >>>>
+15 통로 확보    작업구역 >>>>
+16 보안구역    허가자만 출입 >>>>
+17 지정구역 외 출입금지 >>>>
+18 위험구역    주의구역 >>>>
+19 작업자 외 출입금지 >>>>
+20 장비 보관구역 >>>>
+21 자재 보관구역    자재 적재구역 >>>>
+22 운반구 보관소 >>>>
+23 빈 파렛트 적치구역 >>>>
+24 포장 작업구역 >>>>
+25 반입금지    반출금지 >>>>
+26 안전거리 유지    충돌 주의 >>>>
+27 정리정돈    청결 유지 >>>>
+28 항상 주의    안전제일 >>>>
+29 작업 전 점검 >>>>
+30 적재금지 >>>>
+31 최대 적재하중 >>>>
+32 넘어짐 주의 >>>>
+Preserve exact phrase spelling. Every row text and arrows same size and baseline. Output 2048x2048.

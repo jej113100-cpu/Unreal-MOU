@@ -1,0 +1,11 @@
+Create a production-ready flat raster texture atlas PNG, exactly 2048 x 2048 pixels. Use case: infographic-diagram. Pure black background #000000 and pure white bold Korean industrial warning typography and arrow symbols, crisp clean edges. No photographed surface, perspective, lighting, distress, gradients, borders, grid lines, titles or labels. This is a game texture atlas.
+STRICT GEOMETRY: exactly 4 columns x 8 rows, 32 equal cells, each 512 wide x 256 high, edge-to-edge with ZERO gutters and zero outer margin. The grid is invisible. Every cell's complete white content is horizontally and vertically centered at its precise cell center. Keep content within an internal safe area of 464x208 pixels so absolutely nothing crosses any cell boundary. Cell centers x=256,768,1280,1792 and y=128,384,640,896,1152,1408,1664,1920. All phrases single line, size reduced as needed for longer phrase. Legible heavy sans-serif Korean, exact spelling. Treat rows below as content assignment only; do NOT draw row labels or separator bars. Each | separates cells.
+Row 1: 적재높이 제한 | 보관구역 | 관계자 외 출입금지 | 파손주의
+Row 2: 취급주의 | > | >> | <
+Row 3: 적재높이 제한 | 보관구역 | 관계자 외 출입금지 | 파손주의
+Row 4: 취급주의 | > | >> | <
+Row 5: 적재높이 제한 | 보관구역 | 관계자 외 출입금지 | 파손주의
+Row 6: 취급주의 | → | →→ | ←
+Row 7: 적재높이 제한 | 보관구역 | 관계자 외 출입금지 | 파손주의
+Row 8: 취급주의 | → | →→ | ←
+Symbols > and >> and < must be large thick white chevrons. Arrows are bold industrial arrows. Repeated phrases must use identical spelling and alignment. Black whitespace within cells is allowed for centering, but no gaps between cells. Overall canvas square exactly 2048x2048. Deliver only the texture.

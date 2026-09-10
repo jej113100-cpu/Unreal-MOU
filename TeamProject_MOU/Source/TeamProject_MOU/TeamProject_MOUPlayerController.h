@@ -8,13 +8,18 @@
 #include "TeamProject_MOUPlayerController.generated.h"
 
 class UInputMappingContext;
+class UInputAction;
 class UUserWidget;
 class ULoginWidgetBase;
 class URadioStatusWidget;
 class UVoiceComponent;
 class UVoiceStatusWidget;
+class AMainCharacter;
+class UMOU_CharacterStatusHUD;
+class USpectatorOverlayWidget;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWarehouseDeliverySaveCompleted, bool, bSucceeded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnViewTargetActorChanged, AActor*, NewViewTarget, bool, bIsSelf);
 
 /**
  *  Basic PlayerController class for a third person game
@@ -59,6 +64,62 @@ private:
 	TObjectPtr<UInputMappingContext> ActiveVehicleContext;
 
 public:
+	UPROPERTY(BlueprintAssignable, Category = "Camera")
+	FOnViewTargetActorChanged OnViewTargetActorChanged;
+
+	UFUNCTION(BlueprintCallable, Category = "Spectator")
+	void SpectateNextPlayer();
+
+	UFUNCTION(BlueprintCallable, Category = "Spectator")
+	void SpectatePrevPlayer();
+
+	UFUNCTION(BlueprintCallable, Category = "Spectator")
+	void SetSpectateTarget(AMainCharacter* NewTarget, float BlendTime = 0.25f);
+
+	UFUNCTION(BlueprintPure, Category = "Spectator")
+	TArray<AMainCharacter*> GetAliveTeammates() const;
+
+	UFUNCTION(BlueprintPure, Category = "Spectator")
+	AMainCharacter* GetCurrentSpectateTarget() const { return CurrentSpectateTarget.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Spectator")
+	bool IsSpectating() const { return bIsSpectating; }
+
+	UFUNCTION(BlueprintCallable, Category = "Spectator")
+	void StartSpectating();
+
+	UFUNCTION(BlueprintCallable, Category = "Spectator")
+	void StopSpectating();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Spectator")
+	void StartDeathSpectatorSequence();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Spectator")
+	void OnTurnOffDisplayFinished();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Spectator")
+	void ShowTurnOffDisplay();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Spectator")
+	void HideTurnOffDisplay();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Spectator")
+	void ShowSpectatorOverlay();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Spectator")
+	void HideSpectatorOverlay();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Status")
+	void RegisterStatusHUDWidget(UMOU_CharacterStatusHUD* InStatusHUD);
+
+	UFUNCTION(BlueprintCallable, Category = "UI")
+	void RegisterPlayerHUDWidget(UUserWidget* InPlayerHUD);
+
+	UFUNCTION(BlueprintCallable, Category = "UI|Status")
+	void SetInGameUIHidden(bool bInHidden);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "UI")
+	void OnInGameUIVisibilityChanged(bool bVisible);
 
 protected:
 	/**
@@ -168,8 +229,45 @@ protected:
 	UPROPERTY()
 	TObjectPtr<URadioStatusWidget> RadioStatusWidget;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Spectator")
+	TObjectPtr<UInputMappingContext> SpectatorMappingContext;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Spectator")
+	TObjectPtr<UInputAction> IA_SpectateNext;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Spectator")
+	TObjectPtr<UInputAction> IA_SpectatePrev;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Spectator")
+	int32 SpectatorMappingPriority = 100;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Spectator")
+	TSubclassOf<UUserWidget> TurnOffDisplayWidgetClass;
+
+	UPROPERTY(BlueprintReadWrite, Category = "UI|Spectator")
+	TObjectPtr<UUserWidget> TurnOffDisplayWidget;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Spectator")
+	TSubclassOf<USpectatorOverlayWidget> SpectatorOverlayWidgetClass;
+
+	UPROPERTY(BlueprintReadOnly, Category = "UI|Spectator")
+	TObjectPtr<USpectatorOverlayWidget> SpectatorOverlayWidget;
+
+	UPROPERTY(BlueprintReadWrite, Category = "UI|Status")
+	TObjectPtr<UMOU_CharacterStatusHUD> StatusHUDWidget;
+
+	UPROPERTY(BlueprintReadWrite, Category = "UI")
+	TObjectPtr<UUserWidget> PlayerHUDWidget;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Spectator")
+	float DeathSpectatorDelay = 3.0f;
+
+	FTimerHandle SpectatorTransitionTimerHandle;
+
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
+
+	virtual void PlayerTick(float DeltaTime) override;
 
 	/** Input mapping context setup */
 	virtual void SetupInputComponent() override;
@@ -178,6 +276,15 @@ protected:
 	bool ShouldUseTouchControls() const;
 
 private:
+	TWeakObjectPtr<AMainCharacter> CurrentSpectateTarget;
+	int32 CurrentSpectateIndex = -1;
+	bool bIsSpectating = false;
+
+	TWeakObjectPtr<AActor> LastViewTarget;
+
+	void UpdateSpectatorOverlay();
+	void CheckSpectateTargetAlive();
+
 	/** bAutoShowLoginWidget 이 켜져 있고 아직 로그인 전이면 로그인 위젯을 띄운다. */
 	void ShowLoginWidgetIfNeeded();
 

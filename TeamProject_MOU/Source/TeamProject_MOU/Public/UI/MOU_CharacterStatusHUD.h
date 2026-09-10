@@ -7,6 +7,7 @@
 class UImage;
 class UTexture2D;
 class UMaterialInstanceDynamic;
+class AMainCharacter;
 
 UENUM(BlueprintType)
 enum class ECharacterStatusState : uint8
@@ -42,6 +43,13 @@ public:
 	// Immediately set values without interpolation
 	UFUNCTION(BlueprintCallable, Category = "UI|Status")
 	void ForceUpdateStatus(float NewHPPercent, float NewStaminaPercent);
+
+	// Bind status updates to a specific character (e.g. for spectating)
+	UFUNCTION(BlueprintCallable, Category = "UI|Status")
+	void BindToCharacter(AMainCharacter* InCharacter);
+
+	UFUNCTION(BlueprintPure, Category = "UI|Status")
+	AMainCharacter* GetBoundCharacter() const { return BoundCharacter.Get(); }
 
 protected:
 	// -- UI Components --
@@ -111,6 +119,9 @@ private:
 
 	UPROPERTY()
 	UMaterialInstanceDynamic* MID_StaminaBar;
+
+	UPROPERTY()
+	TWeakObjectPtr<AMainCharacter> BoundCharacter;
 
 	void UpdatePortraitState(float InCurrentHP);
 	void SetPortraitTextureByState(ECharacterStatusState NewState);

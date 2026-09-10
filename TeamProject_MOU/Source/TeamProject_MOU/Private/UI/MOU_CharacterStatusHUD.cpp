@@ -3,6 +3,8 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/Texture2D.h"
 #include "Math/UnrealMathUtility.h"
+#include "Player/MainCharacter.h"
+#include "Base/BaseAttributeSet.h"
 
 void UMOU_CharacterStatusHUD::NativeConstruct()
 {
@@ -25,6 +27,20 @@ void UMOU_CharacterStatusHUD::NativeConstruct()
 void UMOU_CharacterStatusHUD::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	if (BoundCharacter.IsValid())
+	{
+		if (UBaseAttributeSet* Attr = BoundCharacter->BaseAttribute)
+		{
+			const float MaxHP = FMath::Max(1.0f, Attr->GetMaxHealth());
+			const float CurrentHP = FMath::Clamp(Attr->GetHealth(), 0.0f, MaxHP);
+			SetTargetHP(CurrentHP / MaxHP);
+
+			const float MaxStamina = FMath::Max(1.0f, Attr->GetMaxStemina());
+			const float CurrentStamina = FMath::Clamp(Attr->GetStemina(), 0.0f, MaxStamina);
+			SetTargetStamina(CurrentStamina / MaxStamina);
+		}
+	}
 
 	bool bHPUpdated = false;
 
@@ -107,6 +123,20 @@ void UMOU_CharacterStatusHUD::ForceUpdateStatus(float NewHPPercent, float NewSta
 	}
 
 	UpdatePortraitState(CurrentHPPercent);
+}
+
+void UMOU_CharacterStatusHUD::BindToCharacter(AMainCharacter* InCharacter)
+{
+	BoundCharacter = InCharacter;
+	if (InCharacter && InCharacter->BaseAttribute)
+	{
+		UBaseAttributeSet* Attr = InCharacter->BaseAttribute;
+		const float MaxHP = FMath::Max(1.0f, Attr->GetMaxHealth());
+		const float CurrentHP = FMath::Clamp(Attr->GetHealth(), 0.0f, MaxHP);
+		const float MaxStamina = FMath::Max(1.0f, Attr->GetMaxStemina());
+		const float CurrentStamina = FMath::Clamp(Attr->GetStemina(), 0.0f, MaxStamina);
+		ForceUpdateStatus(CurrentHP / MaxHP, CurrentStamina / MaxStamina);
+	}
 }
 
 void UMOU_CharacterStatusHUD::UpdatePortraitState(float InCurrentHP)

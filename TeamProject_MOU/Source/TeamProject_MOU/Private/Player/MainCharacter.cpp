@@ -38,6 +38,8 @@
 #include "Ability/GA_Death.h"
 #include "Ability/GA_Knockdown.h"
 #include "Ability/GA_HitReaction.h"
+#include "TeamProject_MOUPlayerController.h"
+#include "EngineUtils.h"
 
 AMainCharacter::AMainCharacter()
 {
@@ -1881,11 +1883,48 @@ void AMainCharacter::ServerPlayHitReaction_Implementation(float Duration)
 // [그로기 및 사망 / 부활 시스템]
 // ---------------------------------------------------------
 
+bool AMainCharacter::HasAnyAliveTeammate(bool bMustBeConscious) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	for (TActorIterator<AMainCharacter> It(World); It; ++It)
+	{
+		AMainCharacter* OtherChar = *It;
+		if (!OtherChar || OtherChar == this)
+		{
+			continue;
+		}
+		if (!OtherChar->IsPlayerControlled())
+		{
+			continue;
+		}
+		if (OtherChar->bIsDead)
+		{
+			continue;
+		}
+		if (bMustBeConscious && OtherChar->bIsGroggy)
+		{
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
 void AMainCharacter::HandleHealthZero()
 {
 	if (bIsDead)
 	{
 		return;
+	}
+
+	if (!HasAnyAliveTeammate(true))
+	{
+		DownCount = FMath::Max(1, DownCount);
 	}
 
 	if (DownCount == 0 && !bIsGroggy)
@@ -2017,6 +2056,14 @@ void AMainCharacter::MulticastOnDeath_Implementation()
 		VisualComponent->RefreshVisualState();
 	}
 	OnDeath();
+
+	if (IsLocallyControlled())
+	{
+		if (ATeamProject_MOUPlayerController* PC = Cast<ATeamProject_MOUPlayerController>(GetController()))
+		{
+			PC->StartDeathSpectatorSequence();
+		}
+	}
 }
 
 // 클라이언트가 F키를 눌러 서버에서 비로소 살려달라고 요청

@@ -26,6 +26,12 @@
 // 위젯은 누가 자기를 띄우는지 몰라야 하고, 띄우는 정책은 컨트롤러 몫이다.
 #include "Voice/RadioStatusWidget.h"
 #include "Voice/VoiceStatusWidget.h"
+#include "Player/MainCharacter.h"
+#include "UI/MOU_CharacterStatusHUD.h"
+#include "UI/SpectatorOverlayWidget.h"
+#include "EnhancedInputComponent.h"
+#include "EngineUtils.h"
+#include "Blueprint/WidgetTree.h"
 
 ATeamProject_MOUPlayerController::ATeamProject_MOUPlayerController()
 {
@@ -97,6 +103,18 @@ void ATeamProject_MOUPlayerController::SetupInputComponent()
 				{
 					Subsystem->AddMappingContext(CurrentContext, 0);
 				}
+			}
+		}
+
+		if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(InputComponent))
+		{
+			if (IA_SpectateNext)
+			{
+				EnhancedInputComponent->BindAction(IA_SpectateNext, ETriggerEvent::Started, this, &ATeamProject_MOUPlayerController::SpectateNextPlayer);
+			}
+			if (IA_SpectatePrev)
+			{
+				EnhancedInputComponent->BindAction(IA_SpectatePrev, ETriggerEvent::Started, this, &ATeamProject_MOUPlayerController::SpectatePrevPlayer);
 			}
 		}
 	}
@@ -297,4 +315,350 @@ void ATeamProject_MOUPlayerController::ShowVoiceWidgetsIfNeeded()
 				TEXT("무전기 상태 위젯을 만들지 못했다. RadioStatusWidgetClass 가 URadioStatusWidget 을 상속하는지 확인할 것."));
 		}
 	}
+}
+
+void ATeamProject_MOUPlayerController::PlayerTick(float DeltaTime)
+{
+	Super::PlayerTick(DeltaTime);
+
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	AActor* CurrentVT = GetViewTarget();
+	if (CurrentVT != LastViewTarget.Get())
+	{
+		LastViewTarget = CurrentVT;
+		APawn* MyPawn = GetPawn();
+		const bool bIsSelf = (CurrentVT == MyPawn && MyPawn != nullptr);
+
+		OnViewTargetActorChanged.Broadcast(CurrentVT, bIsSelf);
+		UE_LOG(LogTemp, Log, TEXT("[Camera] ViewTarget Changed to: %s (bIsSelf: %d)"), *GetNameSafe(CurrentVT), bIsSelf ? 1 : 0);
+
+		if (!bIsSpectating)
+		{
+			if (!bIsSelf)
+			{
+				SetInGameUIHidden(true);
+			}
+			else
+			{
+				AMainCharacter* MainChar = Cast<AMainCharacter>(MyPawn);
+				if (MainChar && !MainChar->bIsDead)
+				{
+					SetInGameUIHidden(false);
+					if (StatusHUDWidget)
+					{
+						StatusHUDWidget->BindToCharacter(MainChar);
+					}
+				}
+			}
+		}
+	}
+
+	if (bIsSpectating)
+	{
+		CheckSpectateTargetAlive();
+	}
+}
+
+TArray<AMainCharacter*> ATeamProject_MOUPlayerController::GetAliveTeammates() const
+{
+	TArray<AMainCharacter*> AliveList;
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return AliveList;
+	}
+
+	APawn* MyPawn = GetPawn();
+	for (TActorIterator<AMainCharacter> It(World); It; ++It)
+	{
+		AMainCharacter* Char = *It;
+		if (!Char || Char == MyPawn)
+		{
+			continue;
+		}
+		if (!Char->IsPlayerControlled())
+		{
+			continue;
+		}
+		if (Char->bIsDead)
+		{
+			continue;
+		}
+
+		AliveList.Add(Char);
+	}
+	return AliveList;
+}
+
+void ATeamProject_MOUPlayerController::SpectateNextPlayer()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	TArray<AMainCharacter*> AliveList = GetAliveTeammates();
+	if (AliveList.Num() == 0)
+	{
+		StopSpectating();
+		return;
+	}
+
+	CurrentSpectateIndex++;
+	if (CurrentSpectateIndex >= AliveList.Num())
+	{
+		CurrentSpectateIndex = 0;
+	}
+
+	SetSpectateTarget(AliveList[CurrentSpectateIndex]);
+}
+
+void ATeamProject_MOUPlayerController::SpectatePrevPlayer()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	TArray<AMainCharacter*> AliveList = GetAliveTeammates();
+	if (AliveList.Num() == 0)
+	{
+		StopSpectating();
+		return;
+	}
+
+	CurrentSpectateIndex--;
+	if (CurrentSpectateIndex < 0)
+	{
+		CurrentSpectateIndex = AliveList.Num() - 1;
+	}
+
+	SetSpectateTarget(AliveList[CurrentSpectateIndex]);
+}
+
+void ATeamProject_MOUPlayerController::SetSpectateTarget(AMainCharacter* NewTarget, float BlendTime)
+{
+	if (!NewTarget || NewTarget->bIsDead)
+	{
+		return;
+	}
+
+	CurrentSpectateTarget = NewTarget;
+
+	SetViewTargetWithBlend(NewTarget, BlendTime, EViewTargetBlendFunction::VTBlend_EaseInOut, 2.0f, true);
+
+	if (StatusHUDWidget)
+	{
+		StatusHUDWidget->BindToCharacter(NewTarget);
+		StatusHUDWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+
+	if (PlayerHUDWidget)
+	{
+		PlayerHUDWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+
+	UpdateSpectatorOverlay();
+}
+
+void ATeamProject_MOUPlayerController::StartSpectating()
+{
+	if (!IsLocalPlayerController() || bIsSpectating)
+	{
+		return;
+	}
+
+	bIsSpectating = true;
+
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+	{
+		if (SpectatorMappingContext)
+		{
+			Subsystem->AddMappingContext(SpectatorMappingContext, SpectatorMappingPriority);
+		}
+	}
+
+	ShowSpectatorOverlay();
+
+	TArray<AMainCharacter*> AliveList = GetAliveTeammates();
+	if (AliveList.Num() > 0)
+	{
+		CurrentSpectateIndex = 0;
+		SetSpectateTarget(AliveList[0], 0.0f);
+	}
+	else
+	{
+		StopSpectating();
+	}
+}
+
+void ATeamProject_MOUPlayerController::StopSpectating()
+{
+	bIsSpectating = false;
+	CurrentSpectateTarget = nullptr;
+	CurrentSpectateIndex = -1;
+
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+	{
+		if (SpectatorMappingContext)
+		{
+			Subsystem->RemoveMappingContext(SpectatorMappingContext);
+		}
+	}
+
+	HideSpectatorOverlay();
+
+	if (PlayerHUDWidget)
+	{
+		PlayerHUDWidget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+
+	if (StatusHUDWidget)
+	{
+		StatusHUDWidget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+}
+
+void ATeamProject_MOUPlayerController::CheckSpectateTargetAlive()
+{
+	if (!CurrentSpectateTarget.IsValid() || CurrentSpectateTarget->bIsDead)
+	{
+		SpectateNextPlayer();
+	}
+}
+
+void ATeamProject_MOUPlayerController::StartDeathSpectatorSequence()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	SetInGameUIHidden(true);
+	ShowTurnOffDisplay();
+
+	GetWorldTimerManager().ClearTimer(SpectatorTransitionTimerHandle);
+	if (DeathSpectatorDelay > 0.0f)
+	{
+		GetWorldTimerManager().SetTimer(SpectatorTransitionTimerHandle, this,
+			&ATeamProject_MOUPlayerController::OnTurnOffDisplayFinished,
+			DeathSpectatorDelay, false);
+	}
+}
+
+void ATeamProject_MOUPlayerController::OnTurnOffDisplayFinished()
+{
+	GetWorldTimerManager().ClearTimer(SpectatorTransitionTimerHandle);
+	HideTurnOffDisplay();
+	StartSpectating();
+}
+
+void ATeamProject_MOUPlayerController::ShowTurnOffDisplay()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	if (!TurnOffDisplayWidget && TurnOffDisplayWidgetClass)
+	{
+		TurnOffDisplayWidget = CreateWidget<UUserWidget>(this, TurnOffDisplayWidgetClass);
+	}
+
+	if (TurnOffDisplayWidget && !TurnOffDisplayWidget->IsInViewport())
+	{
+		TurnOffDisplayWidget->AddToViewport(1000);
+	}
+}
+
+void ATeamProject_MOUPlayerController::HideTurnOffDisplay()
+{
+	if (TurnOffDisplayWidget && TurnOffDisplayWidget->IsInViewport())
+	{
+		TurnOffDisplayWidget->RemoveFromParent();
+	}
+}
+
+void ATeamProject_MOUPlayerController::ShowSpectatorOverlay()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	if (!SpectatorOverlayWidget && SpectatorOverlayWidgetClass)
+	{
+		SpectatorOverlayWidget = CreateWidget<USpectatorOverlayWidget>(this, SpectatorOverlayWidgetClass);
+	}
+
+	if (SpectatorOverlayWidget && !SpectatorOverlayWidget->IsInViewport())
+	{
+		SpectatorOverlayWidget->AddToViewport(500);
+	}
+
+	UpdateSpectatorOverlay();
+}
+
+void ATeamProject_MOUPlayerController::HideSpectatorOverlay()
+{
+	if (SpectatorOverlayWidget && SpectatorOverlayWidget->IsInViewport())
+	{
+		SpectatorOverlayWidget->RemoveFromParent();
+	}
+}
+
+void ATeamProject_MOUPlayerController::UpdateSpectatorOverlay()
+{
+	if (SpectatorOverlayWidget)
+	{
+		TArray<AMainCharacter*> AliveList = GetAliveTeammates();
+		SpectatorOverlayWidget->SetSpectatorInfo(CurrentSpectateTarget.Get(), AliveList.Num());
+	}
+}
+
+void ATeamProject_MOUPlayerController::RegisterStatusHUDWidget(UMOU_CharacterStatusHUD* InStatusHUD)
+{
+	StatusHUDWidget = InStatusHUD;
+	if (InStatusHUD)
+	{
+		if (AMainCharacter* MainChar = Cast<AMainCharacter>(GetPawn()))
+		{
+			InStatusHUD->BindToCharacter(MainChar);
+		}
+	}
+}
+
+void ATeamProject_MOUPlayerController::RegisterPlayerHUDWidget(UUserWidget* InPlayerHUD)
+{
+	PlayerHUDWidget = InPlayerHUD;
+	if (InPlayerHUD)
+	{
+		if (InPlayerHUD->WidgetTree)
+		{
+			InPlayerHUD->WidgetTree->ForEachWidget([this](UWidget* Widget)
+			{
+				if (UMOU_CharacterStatusHUD* FoundStatusHUD = Cast<UMOU_CharacterStatusHUD>(Widget))
+				{
+					RegisterStatusHUDWidget(FoundStatusHUD);
+				}
+			});
+		}
+	}
+}
+
+void ATeamProject_MOUPlayerController::SetInGameUIHidden(bool bInHidden)
+{
+	if (PlayerHUDWidget)
+	{
+		PlayerHUDWidget->SetVisibility(bInHidden ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	}
+	if (StatusHUDWidget)
+	{
+		StatusHUDWidget->SetVisibility(bInHidden ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	}
+	OnInGameUIVisibilityChanged(!bInHidden);
 }

@@ -107,9 +107,11 @@ public:
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Player|Status")
 	bool bIsReviving = false;
 
-	// 체력이 0이 되었을 때 AttributeSet에서 호출할 함수
 	UFUNCTION(BlueprintCallable, Category = "Player|Status")
 	void HandleHealthZero();
+
+	UFUNCTION(BlueprintPure, Category = "Player|Status")
+	bool HasAnyAliveTeammate(bool bMustBeConscious = true) const;
 
 	// 체력을 전달받아 부활 처리하는 함수
 	UFUNCTION(BlueprintCallable, Category = "Player|Status")
