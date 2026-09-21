@@ -16,6 +16,7 @@ class UVoiceStatusWidget;
 class AMainCharacter;
 class UMOU_CharacterStatusHUD;
 class USpectatorOverlayWidget;
+class UInGameMenuWidget;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWarehouseDeliverySaveCompleted, bool, bSucceeded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnViewTargetActorChanged, AActor*, NewViewTarget, bool, bIsSelf);
@@ -139,6 +140,28 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "UI")
 	void OnInGameUIVisibilityChanged(bool bVisible);
 
+	// --- 인게임 메뉴 (ESC 일시정지) -------------------------------------------
+	UFUNCTION(BlueprintCallable, Category = "UI|InGameMenu")
+	void ToggleInGameMenu();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|InGameMenu")
+	void OpenInGameMenu();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|InGameMenu")
+	void CloseInGameMenu();
+
+	UFUNCTION(BlueprintPure, Category = "UI|InGameMenu")
+	bool IsInGameMenuOpen() const { return bIsInGameMenuOpen; }
+
+	UFUNCTION(BlueprintCallable, Category = "UI|InGameMenu")
+	void ReturnToLobby();
+
+	UFUNCTION(BlueprintCallable, Category = "UI|InGameMenu")
+	void QuitToDesktop();
+
+	UFUNCTION(BlueprintCallable, Category = "Settings")
+	void ApplyUserSettingsToPlayer();
+
 protected:
 	/**
 	 * 음성 송수신 창구 (VOICE_INTEGRATION.md 6절).
@@ -258,6 +281,15 @@ protected:
 	UPROPERTY(BlueprintReadWrite, Category = "UI")
 	TObjectPtr<UUserWidget> PlayerHUDWidget;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|InGameMenu")
+	TSubclassOf<UInGameMenuWidget> InGameMenuWidgetClass;
+
+	UPROPERTY(BlueprintReadOnly, Category = "UI|InGameMenu")
+	TObjectPtr<UInGameMenuWidget> InGameMenuWidget;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|InGameMenu")
+	TObjectPtr<UInputAction> IA_Menu;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Spectator")
 	float DeathSpectatorDelay = 3.0f;
 
@@ -292,9 +324,6 @@ private:
 	void UpdateSpectatorOverlay();
 	void CheckSpectateTargetAlive();
 
-	/** bAutoShowLoginWidget 이 켜져 있고 아직 로그인 전이면 로그인 위젯을 띄운다. */
-	void ShowLoginWidgetIfNeeded();
-
 	/**
 	 * 마이크/무전기 상태 위젯을 띄운다. 이미 떠 있으면 아무것도 안 한다.
 	 *
@@ -303,4 +332,8 @@ private:
 	 */
 	void ShowVoiceWidgetsIfNeeded();
 
+	bool bIsInGameMenuOpen = false;
+
+	// Enhanced Input 액션별 기본 키 캐시 (기본값 복원용)
+	TMap<FName, FKey> DefaultKeyBindingsCache;
 };

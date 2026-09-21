@@ -172,10 +172,6 @@ void AConsumableItemBase::ServerConsume_Implementation()
 	TryConsumeOnServer();
 }
 
-// 복제된 ConsumeUseCount가 각 클라에 도착했을 때 호출 (UI 갱신 등 훅으로 활용 가능)
-void AConsumableItemBase::OnRep_ConsumeUseCount()
-{
-}
 
 // [CONSUME-007] 실제 소비 효과 (기본 빈 구현, 자식이 override)
 void AConsumableItemBase::ApplyEffect_Implementation()

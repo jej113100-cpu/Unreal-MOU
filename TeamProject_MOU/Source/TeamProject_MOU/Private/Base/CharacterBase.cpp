@@ -12,7 +12,7 @@
 
 ACharacterBase::ACharacterBase()
 {
-	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bCanEverTick = false;
 
 	// GAS 어빌리티 시스템 컴포넌트 생성 및 네트워크 리플리케이션 설정
 	AbilitySystemComponent = CreateDefaultSubobject<UAbilitySystemComponent>(TEXT("AbilitySystemComponent"));

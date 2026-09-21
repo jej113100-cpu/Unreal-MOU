@@ -10,6 +10,7 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "UI/MOU_GameUserSettings.h"
 #include "TeamProject_MOU.h"
 
 ATeamProject_MOUCharacter::ATeamProject_MOUCharacter()
@@ -115,9 +116,21 @@ void ATeamProject_MOUCharacter::DoLook(float Yaw, float Pitch)
 {
 	if (GetController() != nullptr)
 	{
+		float Sensitivity = 1.0f;
+		bool bInvertY = false;
+
+		if (UMOU_GameUserSettings* Settings = UMOU_GameUserSettings::GetMOUGameUserSettings())
+		{
+			Sensitivity = Settings->GetMouseSensitivity();
+			bInvertY = Settings->GetInvertY();
+		}
+
+		const float FinalYaw = Yaw * Sensitivity;
+		const float FinalPitch = (bInvertY ? -Pitch : Pitch) * Sensitivity;
+
 		// add yaw and pitch input to controller
-		AddControllerYawInput(Yaw);
-		AddControllerPitchInput(Pitch);
+		AddControllerYawInput(FinalYaw);
+		AddControllerPitchInput(FinalPitch);
 	}
 }
 

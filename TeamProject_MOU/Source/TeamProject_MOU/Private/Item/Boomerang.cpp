@@ -16,8 +16,9 @@
 // [BOOMERANG-007] 초기 컴포넌트와 기본값 설정
 ABoomerang::ABoomerang()
 {
-	// 비행 궤적을 매 프레임 직접 제어해야 하므로 Tick 필수 (AItemBase가 이미 bCanEverTick=true).
+	// 비행 궤적을 매 프레임 직접 제어해야 하므로 Tick 활성화 (비행 중에만 동적으로 켬).
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
 
 	// 부메랑은 근접 콜라이더 오버랩으로 비행 중 타격을 판정한다.
 	HitMode = EWeaponHitMode::Melee;
@@ -37,12 +38,6 @@ void ABoomerang::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(ABoomerang, FlightState);
-}
-
-// 복제된 상태 도착 시 훅 (클라 연출용). 현재 비어있음.
-// [BOOMERANG-010] 복제된 비행 상태 반영
-void ABoomerang::OnRep_FlightState()
-{
 }
 
 // BOOMERANG-000 발사: 비행 시작. (부모 OnUse→TryFireOnServer가 서버 권한 확인 후 호출)
@@ -123,6 +118,7 @@ void ABoomerang::StartFlight()
 	FlightStartLocation = GetActorLocation();
 	ElapsedFlightTime = 0.0f;
 	FlightState = EBoomerangState::Outbound; // 복제됨
+	SetActorTickEnabled(true);
 
 	// 던짐 연출 (전 클라)
 	MulticastThrown();
@@ -301,6 +297,7 @@ void ABoomerang::CatchByOwner()
 
 	FlightState = EBoomerangState::Idle; // 복제됨
 	ElapsedFlightTime = 0.0f;
+	SetActorTickEnabled(false);
 
 	// 손에 돌아왔으니 사용 중 상태 해제 → 슬롯 변경 다시 허용 WEAPON-017
 	FinishUse();

@@ -13,11 +13,19 @@
 UInteractionComponent::UInteractionComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickInterval = 0.05f; // 20Hz (초당 20회 검사 - 연산량 대폭 절감)
 }
 
 void UInteractionComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// 비-로컬 플레이어/서버인 경우 불필요한 Tick을 비활성화하여 Tick Dispatch 비용 제거
+	APawn* PawnOwner = Cast<APawn>(GetOwner());
+	if (PawnOwner && !PawnOwner->IsLocallyControlled())
+	{
+		SetComponentTickEnabled(false);
+	}
 }
 
 void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -163,18 +171,30 @@ void UInteractionComponent::UpdateFocusedInteractable()
 			bool bIsBPInteractable = false;
 			if (UClass* ActorClass = HitActor->GetClass())
 			{
-				for (const FImplementedInterface& Interface : ActorClass->Interfaces)
+				if (const bool* Cached = BPInteractableClassCache.Find(ActorClass))
 				{
-					if (Interface.Class && Interface.Class->GetName().Contains(TEXT("Interaction")))
+					bIsBPInteractable = *Cached;
+				}
+				else
+				{
+					static const FName NAME_InteractWith(TEXT("InteractWith"));
+					static const FName NAME_Interact(TEXT("Interact"));
+
+					for (const FImplementedInterface& Interface : ActorClass->Interfaces)
+					{
+						if (Interface.Class && Interface.Class->GetName().Contains(TEXT("Interaction")))
+						{
+							bIsBPInteractable = true;
+							break;
+						}
+					}
+
+					if (!bIsBPInteractable && (ActorClass->FindFunctionByName(NAME_InteractWith) || ActorClass->FindFunctionByName(NAME_Interact)))
 					{
 						bIsBPInteractable = true;
-						break;
 					}
-				}
 
-				if (!bIsBPInteractable && (ActorClass->FindFunctionByName(FName("InteractWith")) || ActorClass->FindFunctionByName(FName("Interact"))))
-				{
-					bIsBPInteractable = true;
+					BPInteractableClassCache.Add(ActorClass, bIsBPInteractable);
 				}
 			}
 

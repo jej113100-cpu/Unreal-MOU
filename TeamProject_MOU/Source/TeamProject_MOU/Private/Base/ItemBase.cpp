@@ -7,7 +7,7 @@
 
 AItemBase::AItemBase()
 {
-	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bCanEverTick = false;
 	
 	// [멀티플레이] 아이템 상태 및 이동 동기화 필수 설정
 	bReplicates = true;
@@ -91,9 +91,6 @@ void AItemBase::OnRep_ItemIcon()
 	}
 }
 
-void AItemBase::OnRep_CurrentDurability()
-{
-}
 
 bool AItemBase::CanBePickedUpBy(AActor* PotentialPicker) const
 {
@@ -349,6 +346,4 @@ void AItemBase::LoadItemFromData_Implementation(const FStoredItemInstanceData& I
 	CurrentUseCount = InData.CurrentUseCount;
 	CurrentDurability = InData.CurrentDurability;
 	SetActorTransform(InData.Transform);
-
-	OnRep_CurrentDurability();
 }

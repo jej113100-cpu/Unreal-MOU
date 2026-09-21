@@ -63,11 +63,8 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Item|Status")
 	float MaxDurability = 100.0f;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, ReplicatedUsing = OnRep_CurrentDurability, Category = "Item|Status")
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Replicated, Category = "Item|Status")
 	float CurrentDurability = 100.0f;
-
-	UFUNCTION()
-	virtual void OnRep_CurrentDurability();
 
 	// 마지막으로 이 아이템을 소유했던 액터 (평판 추적 등)
 	UPROPERTY(BlueprintReadOnly, Category = "Item|Tracking")

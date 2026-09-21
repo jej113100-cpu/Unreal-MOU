@@ -715,9 +715,6 @@ void APackageBase::DamagePackage(float DamageAmount)
 	
 	CurrentDurability -= DamageAmount;
 	
-	// 서버 자신(로컬)의 UI도 즉시 갱신되도록 수동으로 OnRep 호출
-	OnRep_CurrentDurability();
-	
 	// 파손 처리
 	if (CurrentDurability <= 0.0f)
 	{

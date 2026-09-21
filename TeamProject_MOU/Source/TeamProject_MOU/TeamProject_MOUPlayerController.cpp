@@ -6,6 +6,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
 #include "InputMappingContext.h"
+#include "InputModifiers.h"
 #include "Blueprint/UserWidget.h"
 #include "TeamProject_MOU.h"
 #include "Widgets/Input/SVirtualJoystick.h"
@@ -28,6 +29,11 @@
 #include "Player/SpectatorCameraActor.h"
 #include "EngineUtils.h"
 #include "Blueprint/WidgetTree.h"
+#include "UI/InGameMenuWidget.h"
+#include "UI/MOU_GameUserSettings.h"
+#include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "Camera/CameraComponent.h"
 
 ATeamProject_MOUPlayerController::ATeamProject_MOUPlayerController()
 {
@@ -101,10 +107,28 @@ void ATeamProject_MOUPlayerController::BeginPlay()
 	}
 
 	ShowVoiceWidgetsIfNeeded();
+
+	if (IsLocalPlayerController())
+	{
+		ApplyUserSettingsToPlayer();
+
+		if (UMOU_GameUserSettings* Settings = UMOU_GameUserSettings::GetMOUGameUserSettings())
+		{
+			Settings->OnControlSettingsChanged.AddUObject(this, &ATeamProject_MOUPlayerController::ApplyUserSettingsToPlayer);
+		}
+	}
 }
 
 void ATeamProject_MOUPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (IsLocalPlayerController())
+	{
+		if (UMOU_GameUserSettings* Settings = UMOU_GameUserSettings::GetMOUGameUserSettings())
+		{
+			Settings->OnControlSettingsChanged.RemoveAll(this);
+		}
+	}
+
 	GetWorldTimerManager().ClearTimer(SpectatorTransitionTimerHandle);
 
 	bIsDeathSequenceActive = false;
@@ -163,6 +187,10 @@ void ATeamProject_MOUPlayerController::SetupInputComponent()
 			{
 				EnhancedInputComponent->BindAction(IA_SpectateZoom, ETriggerEvent::Triggered, this, &ATeamProject_MOUPlayerController::OnSpectatorZoom);
 			}
+			if (IA_Menu)
+			{
+				EnhancedInputComponent->BindAction(IA_Menu, ETriggerEvent::Started, this, &ATeamProject_MOUPlayerController::ToggleInGameMenu);
+			}
 		}
 
 		if (InputComponent)
@@ -170,6 +198,9 @@ void ATeamProject_MOUPlayerController::SetupInputComponent()
 			InputComponent->BindAxisKey(EKeys::MouseWheelAxis, this, &ATeamProject_MOUPlayerController::OnSpectatorMouseWheel);
 			InputComponent->BindAxisKey(EKeys::MouseX, this, &ATeamProject_MOUPlayerController::OnSpectatorTurn);
 			InputComponent->BindAxisKey(EKeys::MouseY, this, &ATeamProject_MOUPlayerController::OnSpectatorLookUp);
+
+			// ESC 키를 누르면 인게임 메뉴 토글 (메뉴가 닫혀있으면 열고, 열려있으면 닫음)
+			InputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &ATeamProject_MOUPlayerController::ToggleInGameMenu);
 		}
 	}
 }
@@ -791,5 +822,287 @@ void ATeamProject_MOUPlayerController::OnSpectatorLookUp(float Val)
 
 	CurrentSpectateTarget->AddSpectatorOrbit(Val, 0.0f);
 }
+
+// ---------------------------------------------------------------------------
+// 인게임 메뉴 (ESC 일시정지) 및 환경설정 연동
+// ---------------------------------------------------------------------------
+
+void ATeamProject_MOUPlayerController::ToggleInGameMenu()
+{
+	if (bIsInGameMenuOpen)
+	{
+		if (InGameMenuWidget)
+		{
+			InGameMenuWidget->HandleBackOrEscape();
+		}
+		else
+		{
+			CloseInGameMenu();
+		}
+	}
+	else
+	{
+		OpenInGameMenu();
+	}
+}
+
+void ATeamProject_MOUPlayerController::OpenInGameMenu()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	bIsInGameMenuOpen = true;
+
+	if (!InGameMenuWidget)
+	{
+		UClass* WidgetClass = InGameMenuWidgetClass
+			? InGameMenuWidgetClass.Get()
+			: UInGameMenuWidget::StaticClass();
+
+		InGameMenuWidget = CreateWidget<UInGameMenuWidget>(this, WidgetClass);
+	}
+
+	if (InGameMenuWidget && !InGameMenuWidget->IsInViewport())
+	{
+		InGameMenuWidget->AddToViewport(100);
+	}
+
+	FInputModeGameAndUI InputMode;
+	if (InGameMenuWidget)
+	{
+		InputMode.SetWidgetToFocus(InGameMenuWidget->TakeWidget());
+	}
+	InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+	InputMode.SetHideCursorDuringCapture(false);
+	SetInputMode(InputMode);
+
+	bShowMouseCursor = true;
+	SetIgnoreLookInput(true);
+}
+
+void ATeamProject_MOUPlayerController::CloseInGameMenu()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	bIsInGameMenuOpen = false;
+
+	if (InGameMenuWidget && InGameMenuWidget->IsInViewport())
+	{
+		InGameMenuWidget->RemoveFromParent();
+	}
+
+	FInputModeGameOnly InputMode;
+	SetInputMode(InputMode);
+
+	bShowMouseCursor = false;
+	SetIgnoreLookInput(false);
+}
+
+void ATeamProject_MOUPlayerController::ReturnToLobby()
+{
+	CloseInGameMenu();
+	UGameplayStatics::OpenLevel(this, FName(TEXT("/Game/02_JSY/MainLobby/MainLobby")));
+}
+
+void ATeamProject_MOUPlayerController::QuitToDesktop()
+{
+	UKismetSystemLibrary::QuitGame(this, this, EQuitPreference::Quit, false);
+}
+
+void ATeamProject_MOUPlayerController::ApplyUserSettingsToPlayer()
+{
+	if (!IsLocalPlayerController())
+	{
+		return;
+	}
+
+	UMOU_GameUserSettings* Settings = UMOU_GameUserSettings::GetMOUGameUserSettings();
+	if (!Settings)
+	{
+		return;
+	}
+
+	// 1. FOV 적용
+	const float TargetFOV = Settings->GetFieldOfView();
+	if (PlayerCameraManager)
+	{
+		PlayerCameraManager->SetFOV(TargetFOV);
+	}
+
+	if (APawn* MyPawn = GetPawn())
+	{
+		if (UCameraComponent* Cam = MyPawn->FindComponentByClass<UCameraComponent>())
+		{
+			Cam->SetFieldOfView(TargetFOV);
+		}
+	}
+
+	// 2. Enhanced Input 커스텀 키 리매핑 적용
+	TArray<UInputMappingContext*> AllContexts = DefaultMappingContexts;
+	for (UInputMappingContext* Ctx : MobileExcludedMappingContexts)
+	{
+		if (Ctx)
+		{
+			AllContexts.AddUnique(Ctx);
+		}
+	}
+	if (ActiveVehicleContext)
+	{
+		AllContexts.AddUnique(ActiveVehicleContext);
+	}
+
+	// 이동(WASD) 매핑 방향 판별 헬퍼 람다
+	auto GetMoveDirectionName = [](const FEnhancedActionKeyMapping& Mapping) -> FName
+	{
+		bool bHasSwizzle = false;
+		bool bHasNegate = false;
+
+		for (const TObjectPtr<UInputModifier>& Mod : Mapping.Modifiers)
+		{
+			if (Mod)
+			{
+				if (Mod->IsA<UInputModifierSwizzleAxis>())
+				{
+					bHasSwizzle = true;
+				}
+				else if (Mod->IsA<UInputModifierNegate>())
+				{
+					bHasNegate = true;
+				}
+			}
+		}
+
+		if (bHasSwizzle)
+		{
+			return bHasNegate ? FName("Move_Backward") : FName("Move_Forward");
+		}
+		else
+		{
+			return bHasNegate ? FName("Move_Left") : FName("Move_Right");
+		}
+	};
+
+	// 최초 1회 기본 키 캐시
+	if (DefaultKeyBindingsCache.Num() == 0)
+	{
+		for (UInputMappingContext* Context : AllContexts)
+		{
+			if (!Context)
+			{
+				continue;
+			}
+
+			for (const FEnhancedActionKeyMapping& Mapping : Context->GetMappings())
+			{
+				if (const UInputAction* Action = Mapping.Action)
+				{
+					const FName ActionName = Action->GetFName();
+					if (ActionName == FName("IA_Move") || ActionName == FName("Move"))
+					{
+						const FName DirectionName = GetMoveDirectionName(Mapping);
+						if (!DefaultKeyBindingsCache.Contains(DirectionName))
+						{
+							DefaultKeyBindingsCache.Add(DirectionName, Mapping.Key);
+						}
+					}
+					else if (!DefaultKeyBindingsCache.Contains(ActionName))
+					{
+						DefaultKeyBindingsCache.Add(ActionName, Mapping.Key);
+					}
+				}
+			}
+		}
+	}
+
+	const TMap<FName, FKey>& CustomKeys = Settings->GetAllCustomKeyBindings();
+	UEnhancedInputLocalPlayerSubsystem* Subsystem =
+		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer());
+
+	if (Subsystem)
+	{
+		bool bAnyMappingChanged = false;
+
+		for (UInputMappingContext* Context : AllContexts)
+		{
+			if (!Context)
+			{
+				continue;
+			}
+
+			for (int32 i = 0; i < Context->GetMappings().Num(); ++i)
+			{
+				FEnhancedActionKeyMapping& Mapping = Context->GetMapping(i);
+				if (const UInputAction* Action = Mapping.Action)
+				{
+					const FName ActionName = Action->GetFName();
+					FKey TargetKey;
+
+					if (ActionName == FName("IA_Move") || ActionName == FName("Move"))
+					{
+						const FName DirectionName = GetMoveDirectionName(Mapping);
+						if (const FKey* FoundCustom = CustomKeys.Find(DirectionName))
+						{
+							TargetKey = *FoundCustom;
+						}
+						else if (const FKey* FoundDefault = DefaultKeyBindingsCache.Find(DirectionName))
+						{
+							TargetKey = *FoundDefault;
+						}
+					}
+					else
+					{
+						// 일반 액션 키 적용 (커스텀 키 설정이 있으면 커스텀 키, 없으면 캐시된 기본 키 사용)
+						if (const FKey* FoundCustom = CustomKeys.Find(ActionName))
+						{
+							TargetKey = *FoundCustom;
+						}
+						else if (const FKey* FoundDefault = DefaultKeyBindingsCache.Find(ActionName))
+						{
+							TargetKey = *FoundDefault;
+						}
+					}
+
+					if (TargetKey.IsValid() && Mapping.Key != TargetKey)
+					{
+						Mapping.Key = TargetKey;
+						bAnyMappingChanged = true;
+					}
+				}
+			}
+		}
+
+		if (bAnyMappingChanged)
+		{
+			Subsystem->RequestRebuildControlMappings(FModifyContextOptions(), EInputMappingRebuildType::Rebuild);
+		}
+	}
+
+	// 3. 무전기 및 보이스 상태 위젯 단축키 동기화
+	if (RadioStatusWidget)
+	{
+		if (const FKey* FoundPower = CustomKeys.Find(FName("Radio_Power")))
+		{
+			RadioStatusWidget->PowerToggleKey = *FoundPower;
+		}
+		if (const FKey* FoundTransmit = CustomKeys.Find(FName("Radio_Transmit")))
+		{
+			RadioStatusWidget->TransmitKey = *FoundTransmit;
+		}
+	}
+	if (VoiceStatusWidget)
+	{
+		if (const FKey* FoundMute = CustomKeys.Find(FName("Voice_Mute")))
+		{
+			VoiceStatusWidget->MuteToggleKey = *FoundMute;
+		}
+	}
+}
+
+
 
 

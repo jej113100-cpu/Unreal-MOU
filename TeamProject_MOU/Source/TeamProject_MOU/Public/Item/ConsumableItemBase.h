@@ -45,12 +45,8 @@ protected:
 #pragma region [CONSUME] 사용 횟수 (복제)
 	// 현재 남은 사용 횟수. 서버에서만 차감하고 복제되어 모든 클라에 동기화된다.
 	// (ItemBase의 CurrentUseCount는 복제 안 돼서 별도 복제 변수 사용)
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_ConsumeUseCount, Category = "Consumable")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Replicated, Category = "Consumable")
 	int32 ConsumeUseCount = 0;
-
-	// 복제값 도착 시 호출 (UI 갱신 훅). 현재 비어있음
-	UFUNCTION()
-	void OnRep_ConsumeUseCount();
 #pragma endregion
 
 #pragma region [CONSUME] 소유권 (Server RPC 전제)

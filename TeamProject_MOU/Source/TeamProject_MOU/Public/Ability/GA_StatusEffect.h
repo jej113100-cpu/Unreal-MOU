@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Base/GameplayAbilityBase.h"
@@ -26,11 +26,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "StatusEffect")
 	TObjectPtr<UStatusEffectDataAsset> EffectData;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "StatusEffect")
-	TSubclassOf<class UGameplayEffect> StatusGameplayEffectClass;
-
-	UPROPERTY(Transient)
-	FActiveGameplayEffectHandle ActiveEffectHandle;
 
 	FTimerHandle DurationTimerHandle;
 	float PreviousWalkSpeed = 500.0f;

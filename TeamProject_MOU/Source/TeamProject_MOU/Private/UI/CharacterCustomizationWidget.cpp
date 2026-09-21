@@ -202,12 +202,12 @@ UColorPickerWidget* UCharacterCustomizationWidget::OpenBodyColorPicker()
 	if (ActiveColorPicker)
 	{
 		CloseColorPickers();
-		Picker->InitializeColor(CurrentData.BodyColor);
-		Picker->OnColorChanged.AddDynamic(this, &UCharacterCustomizationWidget::SetBodyColor);
-		Picker->OnColorConfirmed.AddDynamic(this, &UCharacterCustomizationWidget::SetBodyColor);
-		Picker->OnColorCancelled.AddDynamic(this, &UCharacterCustomizationWidget::SetBodyColor);
-		Picker->AddToViewport(100);
-		OpenColorPickers.Add(Picker);
+		ActiveColorPicker->InitializeColor(CurrentData.BodyColor);
+		ActiveColorPicker->OnColorChanged.AddDynamic(this, &UCharacterCustomizationWidget::SetBodyColor);
+		ActiveColorPicker->OnColorConfirmed.AddDynamic(this, &UCharacterCustomizationWidget::SetBodyColor);
+		ActiveColorPicker->OnColorCancelled.AddDynamic(this, &UCharacterCustomizationWidget::SetBodyColor);
+		ActiveColorPicker->AddToViewport(100);
+		OpenColorPickers.Add(ActiveColorPicker);
 	}
 	return ActiveColorPicker;
 }
@@ -234,12 +234,12 @@ UColorPickerWidget* UCharacterCustomizationWidget::OpenDecalColorPicker()
 	if (ActiveColorPicker)
 	{
 		CloseColorPickers();
-		Picker->InitializeColor(CurrentData.DecalsColor);
-		Picker->OnColorChanged.AddDynamic(this, &UCharacterCustomizationWidget::SetDecalsColor);
-		Picker->OnColorConfirmed.AddDynamic(this, &UCharacterCustomizationWidget::SetDecalsColor);
-		Picker->OnColorCancelled.AddDynamic(this, &UCharacterCustomizationWidget::SetDecalsColor);
-		Picker->AddToViewport(100);
-		OpenColorPickers.Add(Picker);
+		ActiveColorPicker->InitializeColor(CurrentData.DecalsColor);
+		ActiveColorPicker->OnColorChanged.AddDynamic(this, &UCharacterCustomizationWidget::SetDecalsColor);
+		ActiveColorPicker->OnColorConfirmed.AddDynamic(this, &UCharacterCustomizationWidget::SetDecalsColor);
+		ActiveColorPicker->OnColorCancelled.AddDynamic(this, &UCharacterCustomizationWidget::SetDecalsColor);
+		ActiveColorPicker->AddToViewport(100);
+		OpenColorPickers.Add(ActiveColorPicker);
 	}
 	return ActiveColorPicker;
 }
@@ -270,8 +270,3 @@ void UCharacterCustomizationWidget::CloseColorPickers()
 	OpenColorPickers.Reset();
 }
 
-void UCharacterCustomizationWidget::NativeDestruct()
-{
-	CloseColorPickers();
-	Super::NativeDestruct();
-}

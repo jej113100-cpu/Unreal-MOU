@@ -111,13 +111,8 @@ protected:
 
 #pragma region [BOOMERANG] 상태 (복제)
 	// 현재 비행 단계. 복제되어 모든 클라에서 연출/판정 동기화.
-	UPROPERTY(ReplicatedUsing = OnRep_FlightState, VisibleAnywhere, BlueprintReadOnly, Category = "Boomerang")
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Boomerang")
 	EBoomerangState FlightState = EBoomerangState::Idle;
-
-	// 복제된 상태 도착 시 훅 (필요 시 클라 연출용). 현재 비어있음.
-	UFUNCTION()
-	// [BOOMERANG-010] 복제된 비행 상태 반영
-	void OnRep_FlightState();
 #pragma endregion
 
 #pragma region [BOOMERANG] 사용/발사/타격

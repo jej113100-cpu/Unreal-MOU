@@ -54,4 +54,7 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<AActor> FocusedActor;
+
+	// 블루프린트 상호작용 여부 판정 캐시 (매 틱 리플렉션/문자열 검색 방지)
+	TMap<TWeakObjectPtr<UClass>, bool> BPInteractableClassCache;
 };

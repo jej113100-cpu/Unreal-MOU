@@ -1,4 +1,4 @@
-﻿#include "Item/ItemDrone.h"
+#include "Item/ItemDrone.h"
 #include "Base/PackageBase.h"
 #include "Components/CarryingComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -521,9 +521,6 @@ void AItemDrone::TickDurabilityDrain(float DeltaTime)
 	// 드론 자신의 내구도를 DurabilityDrainDuration(초)에 걸쳐 0이 되도록 깎는다.
 	const float DrainPerSecond = MaxDurability / DurabilityDrainDuration;
 	CurrentDurability -= DrainPerSecond * DeltaTime;
-
-	// CurrentDurability는 서버에서만 바뀌므로 서버 자신(호스트 화면)에서도 OnRep이 안 불린다. 직접 호출.
-	OnRep_CurrentDurability();
 
 	// 드론 내구도 소진: 보관물 Drop 후 드론 파괴.
 	if (CurrentDurability <= 0.0f)

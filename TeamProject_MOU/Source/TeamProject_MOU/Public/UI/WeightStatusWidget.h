@@ -51,9 +51,6 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UProgressBar> ProgressBar_Weight;
 
-	// 프로그레스 바로 Image를 사용하는 경우 (DMI 기반 제어 지원)
-	UPROPERTY(meta = (BindWidgetOptional))
-	TObjectPtr<UImage> Image_WeightBar;
 
 	// 로봇 얼굴 표정 이미지
 	UPROPERTY(meta = (BindWidgetOptional))
@@ -150,8 +147,6 @@ private:
 
 	float PulseTime = 0.0f;
 
-	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> DMI_WeightBar;
 
 	// 내부 연산 및 갱신 헬퍼
 	void CalculateWeightGrade(float Ratio);

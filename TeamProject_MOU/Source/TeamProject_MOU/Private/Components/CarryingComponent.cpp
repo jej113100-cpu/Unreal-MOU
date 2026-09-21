@@ -9,6 +9,7 @@
 #include "Base/BaseAttributeSet.h"
 #include "Net/UnrealNetwork.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Player/MainCharacter.h"
 #include "AbilitySystemComponent.h"
 #include "Ability/GA_CarryItem.h"
@@ -52,6 +53,10 @@ void UCarryingComponent::OnRep_CarriedActor(AActor* OldCarriedActor)
 			{
 				Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 			}
+			if (USkeletalMeshComponent* Mesh = DroppedChar->GetMesh())
+			{
+				Mesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			}
 			if (UCharacterMovementComponent* MoveComp = DroppedChar->GetCharacterMovement())
 			{
 				MoveComp->SetMovementMode(MOVE_Falling);
@@ -67,6 +72,10 @@ void UCarryingComponent::OnRep_CarriedActor(AActor* OldCarriedActor)
 			if (UCapsuleComponent* Capsule = GrabbedChar->GetCapsuleComponent())
 			{
 				Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			}
+			if (USkeletalMeshComponent* Mesh = GrabbedChar->GetMesh())
+			{
+				Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			}
 			if (UCharacterMovementComponent* MoveComp = GrabbedChar->GetCharacterMovement())
 			{
@@ -126,6 +135,10 @@ void UCarryingComponent::GrabOrDrop()
 			if (UCapsuleComponent* Capsule = CharacterToDrop->GetCapsuleComponent())
 			{
 				Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			}
+			if (USkeletalMeshComponent* Mesh = CharacterToDrop->GetMesh())
+			{
+				Mesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 			}
 			if (UCharacterMovementComponent* MoveComp = CharacterToDrop->GetCharacterMovement())
 			{
@@ -294,6 +307,10 @@ void UCarryingComponent::GrabOrDrop()
 				{
 					Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 				}
+				if (USkeletalMeshComponent* Mesh = HitCharacter->GetMesh())
+				{
+					Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				}
 				if (UCharacterMovementComponent* MoveComp = HitCharacter->GetCharacterMovement())
 				{
 					MoveComp->SetMovementMode(MOVE_None);
@@ -433,6 +450,10 @@ void UCarryingComponent::Throw(const FVector& CustomThrowDir)
 			if (UCapsuleComponent* Capsule = CharacterToThrow->GetCapsuleComponent())
 			{
 				Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			}
+			if (USkeletalMeshComponent* Mesh = CharacterToThrow->GetMesh())
+			{
+				Mesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 			}
 			if (UCharacterMovementComponent* MoveComp = CharacterToThrow->GetCharacterMovement())
 			{

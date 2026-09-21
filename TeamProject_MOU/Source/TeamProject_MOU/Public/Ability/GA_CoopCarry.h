@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Base/GameplayAbilityBase.h"
@@ -19,12 +19,6 @@ public:
 	void SetCoopSpeedRatio(float Ratio);
 
 protected:
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Carry|Coop")
-	TSubclassOf<class UGameplayEffect> CoopCarryEffectClass;
-
-	UPROPERTY(Transient)
-	FActiveGameplayEffectHandle ActiveCoopCarryEffectHandle;
-
 	float CurrentRatio = 1.0f;
 	float BaseWalkSpeed = 500.0f;
 };

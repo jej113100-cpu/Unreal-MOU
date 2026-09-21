@@ -1,4 +1,4 @@
-﻿#include "Components/GrabFollowComponent.h"
+#include "Components/GrabFollowComponent.h"
 
 #include "Components/StatusComponent.h"
 #include "GameFramework/Character.h"
@@ -8,6 +8,7 @@
 UGrabFollowComponent::UGrabFollowComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 	SetIsReplicatedByDefault(true);
 }
 
@@ -53,6 +54,7 @@ void UGrabFollowComponent::StartGrabFollow(ACharacter* NewCarrier, FName NewSock
 	DisableGrabbedMovement();
 	ApplyHeldTag(true);
 	SyncGrabTransform();
+	SetComponentTickEnabled(true);
 	GetOwner()->ForceNetUpdate();
 }
 
@@ -73,6 +75,7 @@ void UGrabFollowComponent::StopGrabFollow()
 	CarrierCharacter = nullptr;
 	ApplyHeldTag(false);
 	RestoreGrabbedMovement();
+	SetComponentTickEnabled(false);
 	GetOwner()->ForceNetUpdate();
 }
 
