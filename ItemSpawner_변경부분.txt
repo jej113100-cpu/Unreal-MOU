@@ -1,0 +1,149 @@
+ItemSpawner 변경 부분
+=====================
+
+1. 저장 아이템 스폰 위치 및 충돌 처리
+
+[변경 전]
+const FTransform SpawnTransform(Rotation, Location);
+AItemBase* SpawnedItem = GetWorld()->SpawnActorDeferred<AItemBase>(
+	ItemSaveData.ItemClass, SpawnTransform, nullptr, nullptr,
+	ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn);
+
+[변경 후]
+const FVector SafeSpawnLocation = CalculateDeliverySpawnLocation(Location, Rotation);
+const FTransform SpawnTransform(Rotation, SafeSpawnLocation);
+AItemBase* SpawnedItem = GetWorld()->SpawnActorDeferred<AItemBase>(
+	ItemSaveData.ItemClass, SpawnTransform, nullptr, nullptr,
+	ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+
+
+2. 저장 데이터 복원 및 최종 배치
+
+[변경 전]
+SpawnedItem->FinishSpawning(SpawnTransform);
+SpawnedItem->LoadItemFromData(ItemSaveData);
+SpawnedItem->SetActorLocationAndRotation(Location, Rotation);
+
+[변경 후]
+FinalizeDeliverySpawn(SpawnedItem, ItemSaveData, SpawnTransform);
+
+
+3. 여러 아이템의 겹침을 방지하는 분산 위치 계산 함수 추가
+
+// [SPAWNER-006] 황금각 나선 배치로 개수와 무관하게 각 아이템 사이의 물리 겹침을 줄입니다.
+FVector AItemSpawner::CalculateDeliverySpawnLocation(const FVector& RequestedLocation, const FRotator& Rotation)
+{
+	const int32 SpawnIndex = DeliverySpawnSequence++;
+	const float Radius = DeliverySpawnSpacing * FMath::Sqrt(static_cast<float>(SpawnIndex));
+	const float AngleRadians = static_cast<float>(SpawnIndex) * 2.39996323f;
+	const FVector LocalOffset(
+		FMath::Cos(AngleRadians) * Radius,
+		FMath::Sin(AngleRadians) * Radius,
+		FMath::Max(0.0f, DeliverySpawnHeightOffset));
+	const FRotator YawOnlyRotation(0.0f, Rotation.Yaw, 0.0f);
+	return RequestedLocation + YawOnlyRotation.RotateVector(LocalOffset);
+}
+
+
+4. 물리를 정지하고 실제 바닥에 배치한 뒤 다시 활성화하는 함수 추가
+
+// [SPAWNER-007] 저장 데이터 복원 중 물리를 정지하고 실제 바닥 높이에 안전하게 배치한 뒤 물리를 활성화합니다.
+void AItemSpawner::FinalizeDeliverySpawn(
+	AItemBase* SpawnedItem,
+	const FStoredItemInstanceData& SaveData,
+	const FTransform& RequestedTransform)
+{
+	if (!IsValid(SpawnedItem))
+	{
+		return;
+	}
+
+	SpawnedItem->FinishSpawning(RequestedTransform);
+
+	UStaticMeshComponent* ItemMesh = SpawnedItem->MeshComponent;
+	if (ItemMesh)
+	{
+		ItemMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+		ItemMesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+		ItemMesh->SetSimulatePhysics(false);
+		ItemMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	SpawnedItem->LoadItemFromData(SaveData);
+
+	SpawnedItem->SetActorLocationAndRotation(
+		RequestedTransform.GetLocation(),
+		RequestedTransform.Rotator(),
+		false,
+		nullptr,
+		ETeleportType::TeleportPhysics);
+
+	FVector FinalLocation = RequestedTransform.GetLocation();
+	if (ItemMesh && GetWorld())
+	{
+		ItemMesh->UpdateBounds();
+
+		const float MeshBottomWorldZ = ItemMesh->Bounds.Origin.Z - ItemMesh->Bounds.BoxExtent.Z;
+		const float ActorToMeshBottomOffset =
+			MeshBottomWorldZ - SpawnedItem->GetActorLocation().Z;
+
+		const FVector TraceStart = FinalLocation + FVector(0.0f, 0.0f, 300.0f);
+		const FVector TraceEnd = FinalLocation - FVector(0.0f, 0.0f, 2000.0f);
+
+		FCollisionObjectQueryParams ObjectQueryParams;
+		ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
+		FCollisionQueryParams QueryParams(
+			SCENE_QUERY_STAT(DeliveryItemGroundTrace), false, SpawnedItem);
+		QueryParams.AddIgnoredActor(this);
+
+		FHitResult GroundHit;
+		if (GetWorld()->LineTraceSingleByObjectType(
+			GroundHit,
+			TraceStart,
+			TraceEnd,
+			ObjectQueryParams,
+			QueryParams))
+		{
+			constexpr float GroundClearance = 3.0f;
+			FinalLocation.Z =
+				GroundHit.ImpactPoint.Z + GroundClearance - ActorToMeshBottomOffset;
+		}
+	}
+
+	SpawnedItem->SetActorLocationAndRotation(
+		FinalLocation,
+		RequestedTransform.Rotator(),
+		false,
+		nullptr,
+		ETeleportType::TeleportPhysics);
+
+	if (ItemMesh)
+	{
+		ItemMesh->SetCollisionProfileName(TEXT("PhysicsActor"));
+		ItemMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		ItemMesh->SetSimulatePhysics(true);
+		ItemMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+		ItemMesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+		ItemMesh->WakeRigidBody();
+	}
+
+	SpawnedItem->ForceNetUpdate();
+}
+
+
+5. ItemSpawner.h에 추가된 설정값과 함수 선언
+
+float DeliverySpawnDelay = 1.0f;
+float DeliverySpawnSpacing = 55.0f;
+float DeliverySpawnHeightOffset = 25.0f;
+int32 DeliverySpawnSequence = 0;
+
+FVector CalculateDeliverySpawnLocation(
+	const FVector& RequestedLocation,
+	const FRotator& Rotation);
+
+void FinalizeDeliverySpawn(
+	AItemBase* SpawnedItem,
+	const FStoredItemInstanceData& SaveData,
+	const FTransform& RequestedTransform);
