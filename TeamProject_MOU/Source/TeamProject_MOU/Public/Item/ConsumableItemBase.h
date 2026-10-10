@@ -6,6 +6,7 @@
 #include "ConsumableItemBase.generated.h"
 
 class UAnimMontage;
+class USoundBase;
 
 /**
  * 소비 아이템 효과 대상
@@ -36,6 +37,7 @@ class TEAMPROJECT_MOU_API AConsumableItemBase : public AItemBase
 	GENERATED_BODY()
 
 public:
+	// [CONSUME-001] 소비 아이템의 공통 사용 사운드 기본값을 초기화한다.
 	AConsumableItemBase();
 
 protected:
@@ -71,7 +73,8 @@ protected:
 	virtual void ApplyEffect_Implementation();
 
 	// [CONSUME-005] 효과 연출(VFX/사운드) 멀티캐스트 → 모든 클라에서 재생
-	UFUNCTION(NetMulticast, Unreliable)
+	// 사용 직후 액터가 파괴될 수 있으므로 클라이언트에서 RPC가 유실되지 않게 Reliable로 전송한다.
+	UFUNCTION(NetMulticast, Reliable)
 	void MulticastPlayUseEffect();
 
 	// [CONSUME-006] 효과 연출 BP 훅 (나이아가라/사운드 등을 BP에서 연결)
@@ -87,6 +90,13 @@ protected:
 	// 비워두면 이벤트를 안 쏨. BP에서 지정.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Consumable")
 	FGameplayTag UseAbilityEventTag;
+
+	// 사용 성공 시 모든 플레이어에게 재생할 사운드. 자식 BP에서 아이템별 음원으로 교체할 수 있다.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Consumable|Audio")
+	TObjectPtr<USoundBase> UseSound;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Consumable|Audio", meta = (ClampMin = "0.0"))
+	float UseSoundVolume = 1.0f;
 
 private:
 	// [CONSUME-008] 클라이언트에서 눌렀을 때 서버로 소비 위임 (서버에서 차감+효과)

@@ -30,6 +30,7 @@ class TEAMPROJECT_MOU_API APotionItem : public AConsumableItemBase
 	GENERATED_BODY()
 
 public:
+	// [POTION-000] 포션 공통 설정과 작은 메시의 바닥 관통 방지용 CCD를 초기화한다.
 	APotionItem();
 
 	// [POTION-016] Q 투척 후 굴러가는 속도에 맞춰 유리 굴림음을 갱신한다.
@@ -159,7 +160,8 @@ private:
 		UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit) override;
 
 	// [POTION-020] 모든 클라이언트에서 충돌 위치에 유리 파손음을 재생한다.
-	UFUNCTION(NetMulticast, Unreliable)
+	// 충돌 직후 포션이 파괴되므로 RPC 유실을 막기 위해 Reliable로 전송한다.
+	UFUNCTION(NetMulticast, Reliable)
 	void MulticastPlayBreakGlassSound(FVector Location);
 
 	// [POTION-021] 모든 클라이언트의 포션 굴림음 추적 상태를 시작하거나 정지한다.

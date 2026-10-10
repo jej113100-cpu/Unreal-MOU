@@ -71,6 +71,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Delivery", meta = (ClampMin = "0.0", Units = "s"))
 	float DeliverySpawnDelay = 1.0f;
 
+	// 여러 저장 아이템이 같은 스포너 좌표에서 겹치지 않도록 나선형으로 벌리는 간격입니다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Delivery", meta = (ClampMin = "0.0", Units = "cm"))
+	float DeliverySpawnSpacing = 55.0f;
+
+	// 작은 아이템이 스폰 순간 바닥과 겹쳐 아래로 빠지지 않도록 기준 위치보다 위에서 생성합니다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Delivery", meta = (ClampMin = "0.0", Units = "cm"))
+	float DeliverySpawnHeightOffset = 25.0f;
+
 	// 확률 스폰 슬롯: 배열 크기 = 슬롯 개수, 각 칸에 DT_Item 행 이름 지정.
 	// 스폰 시 이 중 한 칸을 균등 확률(1/N)로 뽑는다. 빈 칸(None)이 뽑히면 아무것도 안 나옴(꽝).
 	// 예) 5칸 중 4칸만 채우면 각 20%씩 아이템 + 20% 꽝.
@@ -99,15 +107,22 @@ public:
 #pragma endregion
 
 private:
+	// [SPAWNER-006] 동일 위치로 연속 요청된 저장 아이템을 겹치지 않는 나선형 위치로 분산합니다.
+	FVector CalculateDeliverySpawnLocation(const FVector& RequestedLocation, const FRotator& Rotation);
+
 	// [SPAWNER-004] 비동기 로딩과 스트리밍 레벨의 로드·가시성 처리가 끝났는지 검사합니다.
 	bool IsDeliverySpawnWorldReady() const;
 
 	// [SPAWNER-005] 준비 완료까지 대기한 배달품의 Construction과 BeginPlay를 실행합니다.
 	void FinishDeferredDeliverySpawns();
 
+	// [SPAWNER-007] 저장 데이터 복원 중 물리를 정지하고 실제 바닥 높이에 안전하게 배치한 뒤 물리를 활성화합니다.
+	void FinalizeDeliverySpawn(AItemBase* SpawnedItem, const FStoredItemInstanceData& SaveData, const FTransform& RequestedTransform);
+
 	UPROPERTY(Transient)
 	TArray<FDeferredDeliveryItemSpawn> DeferredDeliverySpawns;
 
 	FTimerHandle DeferredDeliverySpawnTimerHandle;
 	float DeliverySpawnEarliestTime = 0.0f;
+	int32 DeliverySpawnSequence = 0;
 };

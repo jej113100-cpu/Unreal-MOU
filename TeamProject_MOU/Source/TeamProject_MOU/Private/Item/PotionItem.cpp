@@ -24,9 +24,17 @@
 		if (GEngine) { GEngine->AddOnScreenDebugMessage(-1, 6.0f, Color, FString::Printf(TEXT("[Potion] " Fmt), ##__VA_ARGS__)); } \
 	} while (0)
 
+// [POTION-000] 포션 공통 설정과 작은 메시의 바닥 관통 방지용 CCD를 초기화한다.
 APotionItem::APotionItem()
 {
 	PrimaryActorTick.bCanEverTick = true;
+
+	// 작은 포션 메시가 중력이나 겹친 물리 바디의 반발로 빠르게 이동할 때도
+	// 바닥 충돌을 건너뛰지 않도록 연속 충돌 감지를 사용한다.
+	if (MeshComponent)
+	{
+		MeshComponent->SetUseCCD(true);
+	}
 
 	// 포션은 자기 자신에게 효과를 준다 (치료 도구 등은 FocusedTarget으로 override)
 	TargetMode = EConsumeTarget::SelfOnly;

@@ -15,6 +15,7 @@ class ACharacter;
 // - 사용 : 손에 들고 좌클릭(OnUse) -> 손에서 배치되어 플레이어를 따라감(팔로우 시작).
 // - 맡기기: 배치(팔로우) 상태에서 F키 -> 손 아이템을 ItemHoldPoint에 거치. [DRONE-001]
 // - 회수 : 배치 상태 + 빈손으로 F키 -> 거치 아이템을 손으로 되돌림. [DRONE-002]
+// - 종료 : 드론과 플레이어가 모두 빈 상태에서 배치자가 F키 -> 팔로우 종료 후 드론을 손으로 회수. [DRONE-014]
 // - 배치 중 아이템을 보관하면 내구도(보관된 아이템)가 5분에 걸쳐 0이 되고 파괴된다. [DRONE-006]
 // ---------------------------------------------------------
 UCLASS()
@@ -119,7 +120,7 @@ public:
 	// 배치(팔로우) 상태에서는 E키 줍기 대상에서 제외한다. (허공에서 E로 드론이 잡히는 것 방지)
 	virtual bool CanBePickedUpBy(AActor* PotentialPicker) const override;
 
-	// F키 상호작용: 배치 상태면 아이템 맡기기/회수, 아니면 기본(줍기)
+	// F키 상호작용: 배치 상태면 아이템 맡기기/회수/빈 드론 종료, 아니면 기본(줍기)
 	virtual bool CanInteract_Implementation(AActor* Interactor) const override;
 	virtual void Interact_Implementation(AActor* Interactor) override;
 	virtual FText GetInteractPrompt_Implementation() const override;
@@ -153,6 +154,9 @@ private:
 
 	// [DRONE-002] 드론이 보관 중인 아이템(슬롯)을 플레이어 손으로 되돌려준다 (서버 전용 처리 흐름).
 	void RetrieveItemToHand(ACharacter* Interactor, bool bRetrievePackage);
+
+	// [DRONE-014] 배치자가 빈 드론 앞에서 빈손으로 상호작용하면 팔로우를 종료하고 손으로 회수한다.
+	void RecallToHand(ACharacter* Interactor);
 
 	// [DRONE-003] 아이템을 드론 거치 지점에 부착 (모든 클라 동기화). 택배면 머리 위, 아니면 아래.
 	UFUNCTION(NetMulticast, Reliable)

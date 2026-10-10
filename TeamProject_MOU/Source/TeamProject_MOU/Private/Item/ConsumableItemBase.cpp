@@ -5,9 +5,19 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Animation/AnimInstance.h"
 #include "AbilitySystemBlueprintLibrary.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
+#include "UObject/ConstructorHelpers.h"
 
+// [CONSUME-001] 소비 아이템의 공통 사용 사운드 기본값을 초기화한다.
 AConsumableItemBase::AConsumableItemBase()
 {
+	static ConstructorHelpers::FObjectFinder<USoundBase> DefaultUseSoundFinder(
+		TEXT("/Game/01_LDJ/Sound/UIPowerOn.UIPowerOn"));
+	if (DefaultUseSoundFinder.Succeeded())
+	{
+		UseSound = DefaultUseSoundFinder.Object;
+	}
 }
 
 void AConsumableItemBase::BeginPlay()
@@ -184,6 +194,13 @@ void AConsumableItemBase::ApplyEffect_Implementation()
 // (몽타주는 GA_UsePotion이 재생 - SendUseAbilityEvent 참고)
 void AConsumableItemBase::MulticastPlayUseEffect_Implementation()
 {
+	// PlaySoundAtLocation은 독립된 오디오 컴포넌트를 만들기 때문에 이 아이템이
+	// 같은 프레임에 소진되어 Destroy되더라도 사운드는 끝까지 재생된다.
+	if (UseSound && GetNetMode() != NM_DedicatedServer)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, UseSound, GetActorLocation(), UseSoundVolume);
+	}
+
 	OnUseEffect();
 }
 

@@ -361,8 +361,13 @@ bool AItemDrone::CanInteract_Implementation(AActor* Interactor) const
 		return bSlotEmpty && CanStoreItem(HandItem);
 	}
 
-	// 빈손이면: 두 슬롯 중 하나라도 차 있으면 회수 가능.
-	return (StoredItem != nullptr) || (StoredPackage != nullptr);
+	// 빈손이면 보관물을 꺼낼 수 있다. 보관물까지 없다면 배치한 플레이어만 드론 자체를 종료·회수할 수 있다.
+	if (StoredItem || StoredPackage)
+	{
+		return true;
+	}
+
+	return Character == FollowTarget;
 }
 
 // [DRONE-009] 이 아이템을 드론에 맡길 수 있는지 판정
@@ -450,6 +455,11 @@ void AItemDrone::HandleInteractOnServer(ACharacter* Character)
 		{
 			RetrieveItemToHand(Character, /*bRetrievePackage=*/true);
 		}
+		else if (Character == FollowTarget)
+		{
+			// 플레이어와 드론이 모두 빈 상태면 드론 팔로우를 종료하고 다시 손에 든다.
+			RecallToHand(Character);
+		}
 	}
 }
 
@@ -465,7 +475,7 @@ FText AItemDrone::GetInteractPrompt_Implementation() const
 	{
 		return NSLOCTEXT("Interaction", "DroneRetrievePrompt", "드론에서 아이템 꺼내기");
 	}
-	return NSLOCTEXT("Interaction", "DroneStorePrompt", "드론에 아이템 맡기기");
+	return NSLOCTEXT("Interaction", "DroneUseOrRecallPrompt", "아이템 맡기기 / 드론 회수");
 }
 
 // [DRONE-001] 손 -> 드론 (맡기기). 택배는 StoredPackage(머리위), 일반은 StoredItem(아래) 슬롯.
@@ -544,6 +554,33 @@ void AItemDrone::RetrieveItemToHand(ACharacter* Interactor, bool bRetrievePackag
 
 	// 손에 쥐어준다. EquipItem이 CarriedActor 설정·무게 갱신·MulticastEquipItem까지 담당.
 	CarryingComp->EquipItem(Item);
+}
+
+// [DRONE-014] 빈 드론의 팔로우·사운드를 종료하고 배치자의 손에 다시 장착한다.
+void AItemDrone::RecallToHand(ACharacter* Interactor)
+{
+	if (!HasAuthority() || !bIsDeployed || !Interactor || Interactor != FollowTarget
+		|| StoredItem || StoredPackage)
+	{
+		return;
+	}
+
+	UCarryingComponent* CarryingComp = Interactor->FindComponentByClass<UCarryingComponent>();
+	if (!CarryingComp || CarryingComp->GetCarriedActor())
+	{
+		return;
+	}
+
+	// 상태를 먼저 종료해 클라이언트의 루프 사운드와 서버 팔로우 Tick을 함께 멈춘다.
+	bIsDeployed = false;
+	FollowTarget = nullptr;
+	bHasCachedFollowBase = false;
+	UpdateDroneLoopSound();
+	ForceNetUpdate();
+
+	// 일반 아이템을 줍는 흐름과 동일하게 물리·충돌을 정리하고 소유권을 회수자에게 돌린다.
+	PickUp(Interactor);
+	CarryingComp->EquipItem(this);
 }
 
 // [DRONE-003] 아이템을 드론 거치 지점에 부착 (모든 클라 동기화)
