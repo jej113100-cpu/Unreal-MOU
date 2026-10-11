@@ -30,6 +30,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Terminal Shop")
 	void ForceCloseShopImmediately();
 
+	// [TSHOP-016] BP 장바구니 맵을 서버 구매 요청 구조체 배열로 변환해 소유 컨트롤러로 전달합니다.
+	UFUNCTION(BlueprintCallable, Category="Terminal Shop")
+	void SubmitTerminalPurchase(const TMap<FName, int32>& CartItems);
+
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;

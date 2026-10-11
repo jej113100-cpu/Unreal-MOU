@@ -96,6 +96,7 @@ public:
 	UFUNCTION(BlueprintCallable, Server, Reliable, Category = "Economy")
 	void ServerSpendGold(int32 Amount);
 
+	// [TSHOP-015] 구매 요청을 서버에서 검증하고 골드 차감과 공용 창고 저장을 확정합니다.
 	UFUNCTION(BlueprintCallable, Server, Reliable, Category = "Terminal Shop")
 	void ServerRequestTerminalPurchase(const TArray<FTerminalCartItem>& Items);
 

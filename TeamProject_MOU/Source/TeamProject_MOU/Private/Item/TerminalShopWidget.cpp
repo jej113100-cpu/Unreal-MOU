@@ -1,6 +1,7 @@
 #include "Item/TerminalShopWidget.h"
 
 #include "Item/TerminalShop.h"
+#include "TeamProject_MOUPlayerController.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
@@ -76,6 +77,36 @@ void UTerminalShopWidget::ForceCloseShopImmediately()
 	bIsOpening = false;
 	bIsClosing = true;
 	FinishCloseShop();
+}
+
+// [TSHOP-016] BP 장바구니 맵을 서버 구매 요청 구조체 배열로 변환해 소유 컨트롤러로 전달합니다.
+void UTerminalShopWidget::SubmitTerminalPurchase(const TMap<FName, int32>& CartItems)
+{
+	ATeamProject_MOUPlayerController* PC = Cast<ATeamProject_MOUPlayerController>(GetOwningPlayer());
+	if (!PC || CartItems.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<FTerminalCartItem> PurchaseItems;
+	PurchaseItems.Reserve(CartItems.Num());
+	for (const TPair<FName, int32>& CartItem : CartItems)
+	{
+		if (CartItem.Key.IsNone() || CartItem.Value <= 0)
+		{
+			continue;
+		}
+
+		FTerminalCartItem PurchaseItem;
+		PurchaseItem.RowName = CartItem.Key;
+		PurchaseItem.Quantity = CartItem.Value;
+		PurchaseItems.Add(PurchaseItem);
+	}
+
+	if (!PurchaseItems.IsEmpty())
+	{
+		PC->ServerRequestTerminalPurchase(PurchaseItems);
+	}
 }
 
 void UTerminalShopWidget::HandlePreLoadMap(const FString& MapName)

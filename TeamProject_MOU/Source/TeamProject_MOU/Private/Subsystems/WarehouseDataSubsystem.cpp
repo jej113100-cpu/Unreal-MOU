@@ -544,6 +544,76 @@ bool UWarehouseDataSubsystem::HasEnoughStoredItems(TSubclassOf<AItemBase> ItemCl
 	return RequiredQuantity > 0 && GetStoredQuantity(ItemClass) >= RequiredQuantity;
 }
 
+// [WAREHOUSE-000] 서버에서 구매 확정된 상품의 수량과 개별 상태를 공용 창고에 함께 저장합니다.
+bool UWarehouseDataSubsystem::AddPurchasedItems(const TArray<FStoredItemData>& PurchasedItems)
+{
+	UWorld* World = GetWorld();
+	UProjectGameInstanceBase* ProjectGameInstance = Cast<UProjectGameInstanceBase>(GetGameInstance());
+	if (!World || World->GetNetMode() == NM_Client || !ProjectGameInstance
+		|| PurchasedItems.IsEmpty() || !CanEditPendingDelivery())
+	{
+		return false;
+	}
+
+	TArray<FStoredItemData> UpdatedStoredItems = ProjectGameInstance->SavedStoredItems;
+	TArray<FStoredItemInstanceData> UpdatedStoredItemInstances = ProjectGameInstance->SavedStoredItemInstances;
+
+	for (const FStoredItemData& PurchasedItem : PurchasedItems)
+	{
+		if (!PurchasedItem.ItemClass || PurchasedItem.Quantity <= 0)
+		{
+			return false;
+		}
+
+		FStoredItemData* ExistingItem = UpdatedStoredItems.FindByPredicate(
+			[&PurchasedItem](const FStoredItemData& StoredItem)
+			{
+				return StoredItem.ItemClass == PurchasedItem.ItemClass;
+			});
+		if (ExistingItem)
+		{
+			if (ExistingItem->Quantity > MAX_int32 - PurchasedItem.Quantity)
+			{
+				return false;
+			}
+			ExistingItem->Quantity += PurchasedItem.Quantity;
+		}
+		else
+		{
+			UpdatedStoredItems.Add(PurchasedItem);
+		}
+
+		const AItemBase* ItemDefaults = PurchasedItem.ItemClass->GetDefaultObject<AItemBase>();
+		for (int32 Count = 0; Count < PurchasedItem.Quantity; ++Count)
+		{
+			FStoredItemInstanceData PurchasedInstance;
+			PurchasedInstance.ItemClass = PurchasedItem.ItemClass;
+			if (ItemDefaults)
+			{
+				PurchasedInstance.CurrentUseCount = ItemDefaults->MaxUseCount;
+				PurchasedInstance.CurrentDurability = ItemDefaults->MaxDurability;
+				if (const APackageBase* PackageDefaults = Cast<APackageBase>(ItemDefaults))
+				{
+					FPackageItemSaveData PackageData;
+					PackageData.BaseValue = PackageDefaults->BaseValue;
+					PackageData.PackageType = PackageDefaults->PackageType;
+					PackageData.MaxSpoilTime = PackageDefaults->MaxSpoilTime;
+					PackageData.CurrentSpoilTime = PackageDefaults->MaxSpoilTime;
+					PackageData.bIsBroken = false;
+					PurchasedInstance.ExtraSaveData.Add(FInstancedStruct::Make(PackageData));
+				}
+			}
+			UpdatedStoredItemInstances.Add(MoveTemp(PurchasedInstance));
+		}
+	}
+
+	ProjectGameInstance->SavedStoredItems = MoveTemp(UpdatedStoredItems);
+	ProjectGameInstance->SavedStoredItemInstances = MoveTemp(UpdatedStoredItemInstances);
+	ProjectGameInstance->bWarehouseInitialized = true;
+	NotifyStoredWarehouseChanged();
+	return true;
+}
+
 bool UWarehouseDataSubsystem::CanBuildDeliveryData(const TArray<FStoredItemData>& RequestedItems) const
 {
 	FDeliveryData DummyData;

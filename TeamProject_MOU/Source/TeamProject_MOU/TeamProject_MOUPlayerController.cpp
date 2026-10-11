@@ -183,6 +183,7 @@ void ATeamProject_MOUPlayerController::ServerSpendGold_Implementation(int32 Amou
 	}
 }
 
+// [TSHOP-015] 구매 요청을 서버에서 검증하고 골드 차감과 공용 창고 저장을 확정합니다.
 void ATeamProject_MOUPlayerController::ServerRequestTerminalPurchase_Implementation(const TArray<FTerminalCartItem>& Items)
 {
 	if (!HasAuthority())
@@ -250,26 +251,39 @@ void ATeamProject_MOUPlayerController::ServerRequestTerminalPurchase_Implementat
 		return;
 	}
 
+	UWarehouseDataSubsystem* Warehouse = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UWarehouseDataSubsystem>() : nullptr;
+	if (!Warehouse)
+	{
+		ClientTerminalPurchaseCompleted(false, NSLOCTEXT("TerminalShop", "NoWarehouse", "창고 데이터를 확인할 수 없습니다."));
+		return;
+	}
+
 	if (!GS->SpendGold(TotalPrice))
 	{
 		ClientTerminalPurchaseCompleted(false, NSLOCTEXT("TerminalShop", "SpendFailed", "골드 차감에 실패했습니다."));
 		return;
 	}
 
-	UWarehouseDataSubsystem* Warehouse = GetGameInstance()
-		? GetGameInstance()->GetSubsystem<UWarehouseDataSubsystem>() : nullptr;
-
-	if (Warehouse)
+	TArray<FStoredItemData> PurchasedItems;
+	PurchasedItems.Reserve(ValidatedRows.Num());
+	for (const auto& Pair : ValidatedRows)
 	{
-		for (const auto& Pair : ValidatedRows)
+		const FItemSpawnRow* Row = Pair.Key;
+		if (Row && Row->ItemClass)
 		{
-			const FItemSpawnRow* Row = Pair.Key;
-			const int32 Qty = Pair.Value;
-			if (Row && Row->ItemClass)
-			{
-				Warehouse->AddPendingDeliveryItem(Row->ItemClass, Qty);
-			}
+			FStoredItemData PurchasedItem;
+			PurchasedItem.ItemClass = Row->ItemClass;
+			PurchasedItem.Quantity = Pair.Value;
+			PurchasedItems.Add(PurchasedItem);
 		}
+	}
+
+	if (!Warehouse->AddPurchasedItems(PurchasedItems))
+	{
+		GS->AddGold(TotalPrice);
+		ClientTerminalPurchaseCompleted(false, NSLOCTEXT("TerminalShop", "WarehouseSaveFailed", "구매품을 창고에 저장하지 못했습니다."));
+		return;
 	}
 
 	ClientTerminalPurchaseCompleted(true, NSLOCTEXT("TerminalShop", "PurchaseSuccess", "구매가 완료되었습니다."));

@@ -86,6 +86,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Warehouse|Storage")
 	bool HasEnoughStoredItems(TSubclassOf<AItemBase> ItemClass, int32 RequiredQuantity) const;
 
+	// [WAREHOUSE-000] 서버에서 구매 확정된 상품의 수량과 개별 상태를 공용 창고에 함께 저장합니다.
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Warehouse|Storage")
+	bool AddPurchasedItems(const TArray<FStoredItemData>& PurchasedItems);
+
 	// 요청 목록이 현재 창고 수량 기준으로 배달 가능 상태 검사
 	UFUNCTION(BlueprintCallable, Category = "Warehouse|Delivery")
 	bool CanBuildDeliveryData(const TArray<FStoredItemData>& RequestedItems) const;
